@@ -5,7 +5,6 @@
   var SOURCE = "a3geo-neg-export";
   var injected = false;
   var pending = null;
-  var utils = globalThis.A3GeoExportUtils;
 
   function showBanner(message, isError) {
     var id = "a3geo-neg-export-cs-banner";
@@ -24,6 +23,7 @@
         borderRadius: "8px",
         color: "#fff",
         fontSize: "13px",
+        whiteSpace: "pre-wrap",
         boxShadow: "0 8px 24px rgba(0,0,0,.2)",
         fontFamily: "system-ui,-apple-system,sans-serif"
       });
@@ -34,7 +34,7 @@
     clearTimeout(el.__timer);
     el.__timer = setTimeout(function () {
       if (el && el.parentNode) el.parentNode.removeChild(el);
-    }, isError ? 10000 : 5000);
+    }, isError ? 12000 : 10000);
   }
 
   function injectPageScript() {
@@ -68,7 +68,6 @@
       var s = document.createElement("script");
       s.src = chrome.runtime.getURL("injected.js");
       s.onload = function () {
-        // ready event may have already fired; give it a tick
         setTimeout(function () {
           if (!settled) done();
         }, 50);
@@ -124,36 +123,27 @@
 
     if (data.type !== "done") return;
 
-    try {
-      if (!utils || typeof utils.downloadRows !== "function") {
-        throw new Error("导出工具未加载，请重新加载扩展");
-      }
-      var result = utils.downloadRows(
-        data.rows || [],
-        data.meta || {},
-        data.format || "both"
-      );
-      showBanner(
-        "导出完成：共 " + (data.total || (data.rows || []).length) + " 条，已开始下载",
-        false
-      );
-      if (pending) {
-        pending.resolve({
-          ok: true,
-          total: data.total || (data.rows || []).length,
-          format: data.format,
-          meta: data.meta,
-          filenames: result.filenames
-        });
-        pending = null;
-      }
-    } catch (err) {
-      var message = (err && err.message) || String(err);
-      showBanner(message, true);
-      if (pending) {
-        pending.reject(err);
-        pending = null;
-      }
+    // Download already happens in page MAIN world (injected.js).
+    // Here we only finish the popup promise and show where files went.
+    var names = (data.saved || []).join("、") || "CSV/Excel";
+    showBanner(
+      "导出完成：共 " +
+        (data.total || 0) +
+        " 条。文件 " +
+        names +
+        " 已触发下载，请到浏览器下载栏 /「下载」文件夹查看（也可打开 chrome://downloads）。",
+      false
+    );
+    if (pending) {
+      pending.resolve({
+        ok: true,
+        total: data.total || 0,
+        format: data.format,
+        meta: data.meta,
+        filenames: data.filenames,
+        saved: data.saved
+      });
+      pending = null;
     }
   });
 
@@ -190,7 +180,6 @@
     return true;
   });
 
-  // Warm inject on sentiment pages so FAB appears.
   if (/\/monitor\/sentiment/.test(location.pathname)) {
     injectPageScript().catch(function (err) {
       showBanner((err && err.message) || "扩展注入失败，请刷新页面", true);

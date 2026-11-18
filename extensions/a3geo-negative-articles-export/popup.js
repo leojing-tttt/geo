@@ -68,7 +68,17 @@ document.getElementById("exportBtn").addEventListener("click", async function ()
       throw new Error((response && response.error) || "导出失败");
     }
 
-    setStatus("完成：共 " + response.total + " 条，浏览器应已开始下载", "ok");
+    var files =
+      (response.saved && response.saved.join("、")) ||
+      "CSV/Excel（见页面提示）";
+    setStatus(
+      "完成：共 " +
+        response.total +
+        " 条。文件：" +
+        files +
+        "。请到浏览器下载栏或「下载」文件夹查看（chrome://downloads）",
+      "ok"
+    );
   } catch (err) {
     setStatus((err && err.message) || String(err), "error");
   } finally {
