@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "A3GEO 负面文章导出",
+  "version": "1.0.3",
+  "description": "一键导出 A3GEO「全部负面文章」完整列表（CSV / Excel）",
+  "action": {
+    "default_title": "导出全部负面文章",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["activeTab", "scripting", "downloads"],
+  "host_permissions": [
+    "https://geo.a3database.cn/*",
+    "https://api.aidso.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://geo.a3database.cn/*"],
+      "js": ["lib/export-utils.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js", "lib/export-utils.js"],
+      "matches": ["https://geo.a3database.cn/*"]
+    }
+  ]
+}

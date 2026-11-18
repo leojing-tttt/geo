@@ -1,0 +1,16 @@
+---
+description: MV3 extension export/download acceptance — file on disk required
+globs: extensions/**/*
+alwaysApply: false
+---
+
+# Extension download acceptance
+
+Do not claim the exporter is tested unless a real click path produced a file on disk.
+
+- API success or progress UI alone is not enough.
+- Download must run in the world that actually triggers save (page / content / SW); re-test after architecture changes.
+- Without a usable logged-in session, state the blocker; do not fake E2E.
+- Success UI must name the file and point to downloads / `chrome://downloads`.
+
+Full checklist: user principle `browser-extension-download-acceptance`.

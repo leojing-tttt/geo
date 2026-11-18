@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>A3GEO 负面文章导出</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <h1>负面文章导出</h1>
+      <p class="hint">
+        请先打开并登录
+        <code>geo.a3database.cn/monitor/sentiment</code>，选好品牌 / 平台 /
+        问题 / 日期后点击导出。将拉取「全部负面文章」完整列表（非首页预览）。
+      </p>
+
+      <div class="formats">
+        <label><input type="radio" name="format" value="both" checked /> CSV + Excel</label>
+        <label><input type="radio" name="format" value="csv" /> 仅 CSV</label>
+        <label><input type="radio" name="format" value="xls" /> 仅 Excel (.xls)</label>
+      </div>
+
+      <button id="exportBtn" type="button">一键导出全部负面文章</button>
+      <p id="status" class="status" aria-live="polite"></p>
+
+      <ul class="notes">
+        <li>必须先打开并停留在 /monitor/sentiment 标签页</li>
+        <li>导出时页面顶部会出现绿色进度/红色错误提示</li>
+        <li>也可点舆情页右下角绿色浮动按钮</li>
+        <li>若无反应：扩展页点「重新加载」→ 刷新舆情页 → 再导出</li>
+      </ul>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
