@@ -1,15 +1,14 @@
 /**
- * Shared CSV / simple XLSX helpers (no third-party runtime deps).
- * Used by the extension popup/background download path.
+ * Shared CSV / Excel helpers. Safe for content script + service worker.
  */
 (function (root, factory) {
+  var api = factory();
+  root.A3GeoExportUtils = api;
   if (typeof module === "object" && module.exports) {
-    module.exports = factory();
-  } else {
-    root.A3GeoExportUtils = factory();
+    module.exports = api;
   }
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
-  const COLUMNS = [
+  var COLUMNS = [
     { key: "title", label: "文章名称" },
     { key: "publish_time", label: "发布时间" },
     { key: "site_name", label: "发布站点" },
@@ -25,75 +24,89 @@
   ];
 
   function cellValue(row, key) {
-    const v = row[key];
+    var v = row[key];
     if (v == null) return "";
     if (Array.isArray(v)) return v.join(",");
     return String(v);
   }
 
   function escapeCsv(value) {
-    const s = String(value ?? "");
-    if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    var s = String(value == null ? "" : value);
+    if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
     return s;
   }
 
   function toCsv(rows) {
-    const header = COLUMNS.map((c) => escapeCsv(c.label)).join(",");
-    const lines = rows.map((row) =>
-      COLUMNS.map((c) => escapeCsv(cellValue(row, c.key))).join(",")
-    );
-    // UTF-8 BOM so Excel opens Chinese correctly
-    return "\uFEFF" + [header, ...lines].join("\r\n");
+    var header = COLUMNS.map(function (c) {
+      return escapeCsv(c.label);
+    }).join(",");
+    var lines = (rows || []).map(function (row) {
+      return COLUMNS.map(function (c) {
+        return escapeCsv(cellValue(row, c.key));
+      }).join(",");
+    });
+    return "\uFEFF" + [header].concat(lines).join("\r\n");
   }
 
   function xmlEscape(s) {
-    return String(s ?? "")
+    return String(s == null ? "")
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;");
   }
 
-  /** SpreadsheetML (.xls) — opens natively in Excel / WPS without SheetJS. */
   function toSpreadsheetMl(rows) {
-    const header = COLUMNS.map(
-      (c) => `<Cell><Data ss:Type="String">${xmlEscape(c.label)}</Data></Cell>`
-    ).join("");
-    const body = rows
-      .map((row) => {
-        const cells = COLUMNS.map((c) => {
-          const raw = cellValue(row, c.key);
-          const isNum =
+    var header = COLUMNS.map(function (c) {
+      return (
+        "<Cell><Data ss:Type=\"String\">" +
+        xmlEscape(c.label) +
+        "</Data></Cell>"
+      );
+    }).join("");
+    var body = (rows || [])
+      .map(function (row) {
+        var cells = COLUMNS.map(function (c) {
+          var raw = cellValue(row, c.key);
+          var isNum =
             raw !== "" &&
-            !Number.isNaN(Number(raw)) &&
+            !isNaN(Number(raw)) &&
             /^-?\d+(\.\d+)?$/.test(raw);
-          const type = isNum ? "Number" : "String";
-          return `<Cell><Data ss:Type="${type}">${xmlEscape(raw)}</Data></Cell>`;
+          var type = isNum ? "Number" : "String";
+          return (
+            "<Cell><Data ss:Type=\"" +
+            type +
+            "\">" +
+            xmlEscape(raw) +
+            "</Data></Cell>"
+          );
         }).join("");
-        return `<Row>${cells}</Row>`;
+        return "<Row>" + cells + "</Row>";
       })
       .join("");
     return (
-      `<?xml version="1.0"?>\r\n` +
-      `<?mso-application progid="Excel.Sheet"?>\r\n` +
-      `<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"\r\n` +
-      ` xmlns:o="urn:schemas-microsoft-com:office:office"\r\n` +
-      ` xmlns:x="urn:schemas-microsoft-com:office:excel"\r\n` +
-      ` xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"\r\n` +
-      ` xmlns:html="http://www.w3.org/TR/REC-html40">\r\n` +
-      `<Worksheet ss:Name="全部负面文章">\r\n` +
-      `<Table>\r\n` +
-      `<Row>${header}</Row>\r\n` +
-      `${body}\r\n` +
-      `</Table>\r\n` +
-      `</Worksheet>\r\n` +
-      `</Workbook>`
+      '<?xml version="1.0"?>\r\n' +
+      '<?mso-application progid="Excel.Sheet"?>\r\n' +
+      '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"\r\n' +
+      ' xmlns:o="urn:schemas-microsoft-com:office:office"\r\n' +
+      ' xmlns:x="urn:schemas-microsoft-com:office:excel"\r\n' +
+      ' xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"\r\n' +
+      ' xmlns:html="http://www.w3.org/TR/REC-html40">\r\n' +
+      '<Worksheet ss:Name="negative-articles">\r\n' +
+      "<Table>\r\n" +
+      "<Row>" +
+      header +
+      "</Row>\r\n" +
+      body +
+      "\r\n</Table>\r\n</Worksheet>\r\n</Workbook>"
     );
   }
 
   function stamp() {
-    const d = new Date();
-    const p = (n) => String(n).padStart(2, "0");
+    var d = new Date();
+    function p(n) {
+      return String(n).padStart(2, "0");
+    }
     return (
       d.getFullYear() +
       p(d.getMonth() + 1) +
@@ -106,14 +119,60 @@
   }
 
   function buildFilenames(meta) {
-    const brand = (meta && meta.brandLabel) || "brand";
-    const safe = String(brand).replace(/[\\/:*?"<>|]+/g, "_").slice(0, 40);
-    const t = stamp();
+    var brand = (meta && meta.brandLabel) || "brand";
+    var safe = String(brand)
+      .replace(/[\\/:*?"<>|]+/g, "_")
+      .replace(/\s+/g, "")
+      .slice(0, 40);
+    // Keep an ASCII-friendly prefix so Chrome download never silently drops the file.
+    var t = stamp();
     return {
-      csv: `A3GEO-负面文章-${safe}-${t}.csv`,
-      xls: `A3GEO-负面文章-${safe}-${t}.xls`
+      csv: "a3geo-negative-" + safe + "-" + t + ".csv",
+      xls: "a3geo-negative-" + safe + "-" + t + ".xls"
     };
   }
 
-  return { COLUMNS, toCsv, toSpreadsheetMl, buildFilenames, cellValue };
+  function triggerBrowserDownload(filename, text, mime) {
+    var blob = new Blob([text], { type: mime || "text/plain;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.style.display = "none";
+    document.documentElement.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () {
+      URL.revokeObjectURL(url);
+    }, 30_000);
+  }
+
+  function downloadRows(rows, meta, format) {
+    var names = buildFilenames(meta || {});
+    var fmt = format || "both";
+    if (fmt === "csv" || fmt === "both") {
+      triggerBrowserDownload(
+        names.csv,
+        toCsv(rows || []),
+        "text/csv;charset=utf-8"
+      );
+    }
+    if (fmt === "xls" || fmt === "xlsx" || fmt === "both") {
+      triggerBrowserDownload(
+        names.xls,
+        toSpreadsheetMl(rows || []),
+        "application/vnd.ms-excel;charset=utf-8"
+      );
+    }
+    return { ok: true, filenames: names, count: (rows || []).length };
+  }
+
+  return {
+    COLUMNS: COLUMNS,
+    toCsv: toCsv,
+    toSpreadsheetMl: toSpreadsheetMl,
+    buildFilenames: buildFilenames,
+    downloadRows: downloadRows,
+    triggerBrowserDownload: triggerBrowserDownload
+  };
 });

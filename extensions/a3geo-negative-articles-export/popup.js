@@ -1,30 +1,40 @@
 function selectedFormat() {
-  const el = document.querySelector('input[name="format"]:checked');
+  var el = document.querySelector('input[name="format"]:checked');
   return (el && el.value) || "both";
 }
 
 function setStatus(text, kind) {
-  const status = document.getElementById("status");
+  var status = document.getElementById("status");
   status.textContent = text || "";
   status.className = "status" + (kind ? " " + kind : "");
 }
 
 async function getSentimentTab() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs[0];
+  var tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  var tab = tabs[0];
   if (!tab || !tab.id) throw new Error("未找到当前标签页");
-  if (!tab.url || !tab.url.includes("geo.a3database.cn")) {
-    throw new Error("请先打开 https://geo.a3database.cn 并进入品牌舆情追踪页");
+  if (!tab.url || tab.url.indexOf("geo.a3database.cn") === -1) {
+    throw new Error("请先打开并激活 https://geo.a3database.cn 舆情页标签");
+  }
+  if (tab.url.indexOf("/monitor/sentiment") === -1) {
+    throw new Error("请先进入「品牌监测 → 品牌舆情追踪」(/monitor/sentiment)");
   }
   return tab;
 }
 
-document.getElementById("exportBtn").addEventListener("click", async () => {
-  const btn = document.getElementById("exportBtn");
-  btn.disabled = true;
-  setStatus("正在导出…");
+async function injectContent(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    files: ["lib/export-utils.js", "content.js"]
+  });
+}
 
-  const onProgress = (msg) => {
+document.getElementById("exportBtn").addEventListener("click", async function () {
+  var btn = document.getElementById("exportBtn");
+  btn.disabled = true;
+  setStatus("正在导出…请同时看页面顶部绿色/红色提示条");
+
+  var onProgress = function (msg) {
     if (msg && msg.type === "export-progress") {
       setStatus(msg.message || "导出中…");
     }
@@ -32,24 +42,25 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
   chrome.runtime.onMessage.addListener(onProgress);
 
   try {
-    const tab = await getSentimentTab();
-    const format = selectedFormat();
+    var tab = await getSentimentTab();
+    var format = selectedFormat();
 
-    let response;
+    var response;
     try {
       response = await chrome.tabs.sendMessage(tab.id, {
         type: "export-negative-articles",
-        format
+        format: format
       });
     } catch (e) {
-      // Content script may not be ready yet (page opened before install).
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ["content.js"]
+      setStatus("正在注入扩展脚本…");
+      await injectContent(tab.id);
+      // small delay so listeners attach
+      await new Promise(function (r) {
+        setTimeout(r, 200);
       });
       response = await chrome.tabs.sendMessage(tab.id, {
         type: "export-negative-articles",
-        format
+        format: format
       });
     }
 
@@ -57,7 +68,7 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
       throw new Error((response && response.error) || "导出失败");
     }
 
-    setStatus(`完成：共 ${response.total} 条，已触发下载`, "ok");
+    setStatus("完成：共 " + response.total + " 条，浏览器应已开始下载", "ok");
   } catch (err) {
     setStatus((err && err.message) || String(err), "error");
   } finally {
