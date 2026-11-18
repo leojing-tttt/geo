@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "A3GEO 负面文章导出",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "一键导出 A3GEO「全部负面文章」完整列表（CSV / Excel）",
   "action": {
     "default_title": "导出全部负面文章",
