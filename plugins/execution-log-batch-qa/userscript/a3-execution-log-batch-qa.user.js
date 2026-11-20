@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         A3 执行记录 · 批量下载问答
 // @namespace    https://github.com/leojing-tttt/geo
-// @version      1.0.2
-// @description  在 Agent 中心「执行记录」批量下载「下载问答」并打成 ZIP（安全模式：不劫持 fetch/history、不改表格 DOM）
+// @version      1.0.3
+// @description  批量下载「下载问答」为 ZIP；条目名=用户_最近一轮.txt（安全模式）
 // @author       geo plugin
 // @match        https://a3-lib.a3database.cn/*
 // @match        https://a3-pre-lib.a3database.cn/*
@@ -20,7 +20,7 @@
   "use strict";
   try {
 /**
- * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.2+).
+ * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.3+).
  *
  * Safety rules (do NOT break page load):
  * - Never monkeypatch window.fetch / history.pushState / replaceState
@@ -50,7 +50,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  var VERSION = "1.0.2";
+  var VERSION = "1.0.3";
   var VARIANT = "brief";
   var POLL_MS = 1500;
   var HOST_AGENT = {
@@ -98,31 +98,22 @@
     }
   }
 
-  function parseFilenameFromDisposition(header) {
-    if (!header) return null;
-    var star = /filename\*\s*=\s*(?:UTF-8''|utf-8'')([^;]+)/i.exec(header);
-    if (star && star[1]) {
-      try {
-        return decodeURIComponent(star[1].trim().replace(/^"(.*)"$/, "$1"));
-      } catch (e) {
-        return star[1].trim();
-      }
-    }
-    var quoted = /filename\s*=\s*"([^"]+)"/i.exec(header);
-    if (quoted && quoted[1]) return quoted[1];
-    var plain = /filename\s*=\s*([^;]+)/i.exec(header);
-    if (plain && plain[1]) return plain[1].trim().replace(/^"(.*)"$/, "$1");
-    return null;
+  function sanitizeFilenamePart(raw, maxLen) {
+    var s = String(raw == null ? "" : raw).trim();
+    // whitespace + filesystem-unsafe + path separators → _
+    s = s.replace(/[\s\/\\?%*:|"<>\u0000-\u001f]+/g, "_");
+    s = s.replace(/\.+$/g, ""); // trailing dots bad on Windows
+    s = s.replace(/_+/g, "_").replace(/^_+|_+$/g, "");
+    if (!s) s = "unknown";
+    if (s.length > (maxLen || 80)) s = s.slice(0, maxLen || 80);
+    return s;
   }
 
-  function fallbackFilename(sessionId, variant) {
-    var u = "";
-    var f = String(sessionId || "").trim();
-    for (var i = 0; i < f.length && u.length < 80; i++) {
-      var ch = f[i];
-      u += /[A-Za-z0-9_-]/.test(ch) ? ch : "_";
-    }
-    return "execution-" + (u || "conversation") + "-" + (variant || VARIANT) + ".txt";
+  function shortSessionSuffix(sessionId) {
+    var id = String(sessionId || "").trim();
+    if (!id) return "x";
+    if (id.length <= 8) return id;
+    return id.slice(0, 4) + id.slice(-4);
   }
 
   function zipStamp() {
@@ -355,26 +346,43 @@
       throw new Error("下载失败 " + sessionId + " (HTTP " + res.status + ")" + (detail ? ": " + detail : ""));
     }
     var buf = new Uint8Array(await res.arrayBuffer());
-    var name =
-      parseFilenameFromDisposition(res.headers.get("content-disposition")) ||
-      fallbackFilename(sessionId, VARIANT);
-    return { name: name, data: buf, sessionId: sessionId };
+    // ZIP entry name comes from list columns 用户 + 最近一轮 (not Content-Disposition)
+    var meta = readRowMeta(sessionId);
+    return {
+      name: buildEntryFilename(meta.user, meta.recent, sessionId, false),
+      data: buf,
+      sessionId: sessionId,
+      user: meta.user,
+      recent: meta.recent,
+    };
   }
 
   function uniqueZipNames(files) {
     var used = Object.create(null);
     return files.map(function (f) {
-      var base = f.name || f.sessionId + ".txt";
+      var base = buildEntryFilename(f.user, f.recent, f.sessionId, false);
       var name = base;
-      var n = 1;
+      if (used[name]) {
+        // duplicate → append short session suffix
+        name = buildEntryFilename(f.user, f.recent, f.sessionId, true);
+      }
+      var n = 2;
       while (used[name]) {
-        var dot = base.lastIndexOf(".");
-        name = dot > 0 ? base.slice(0, dot) + "-" + n + base.slice(dot) : base + "-" + n;
+        var stem = name.replace(/\.txt$/i, "");
+        name = stem + "-" + n + ".txt";
         n++;
       }
       used[name] = true;
       return { name: name, data: f.data };
     });
+  }
+
+  function buildEntryFilename(user, recent, sessionId, withSessionSuffix) {
+    var u = sanitizeFilenamePart(user || "unknown", 60);
+    var r = sanitizeFilenamePart(recent || "unknown", 60);
+    var base = u + "_" + r;
+    if (withSessionSuffix) base = base + "_" + shortSessionSuffix(sessionId);
+    return base + ".txt";
   }
 
   function triggerDownload(bytes, filename) {
@@ -397,6 +405,82 @@
   }
 
   /* ---- DOM helpers (read-only on page table) ---- */
+  function findExecLogTable() {
+    return (
+      document.querySelector(".exec-log__table table") ||
+      document.querySelector(".exec-log table.ant-table-tbody") ||
+      document.querySelector(".exec-log table") ||
+      document.querySelector("table")
+    );
+  }
+
+  /**
+   * Map thead title → data cell index.
+   * Ant Table may have expand/measure cols; match by visible header text.
+   * Known columns: 会话 | 最近一轮 | 状态 | 用户 | Agent | …
+   */
+  function resolveColumnIndexes() {
+    var out = { user: -1, recent: -1 };
+    try {
+      var table = findExecLogTable();
+      if (!table) return out;
+      // Prefer header table (antd may split header/body tables)
+      var headerTable =
+        document.querySelector(".exec-log__table .ant-table-header table") ||
+        document.querySelector(".exec-log .ant-table-header table") ||
+        table;
+      var ths = headerTable.querySelectorAll("thead th");
+      if (!ths.length) ths = table.querySelectorAll("thead th");
+      for (var i = 0; i < ths.length; i++) {
+        var title = (ths[i].textContent || "").replace(/\s+/g, " ").trim();
+        if (title === "用户" || title.indexOf("用户") === 0) out.user = i;
+        if (title === "最近一轮" || title.indexOf("最近一轮") === 0) out.recent = i;
+      }
+      // Fallback to known order from production page JS when headers not found
+      if (out.user < 0 || out.recent < 0) {
+        // 会话(0) 最近一轮(1) 状态(2) 用户(3) …
+        if (out.recent < 0) out.recent = 1;
+        if (out.user < 0) out.user = 3;
+      }
+    } catch (e) {
+      out = { user: 3, recent: 1 };
+    }
+    return out;
+  }
+
+  function cellText(tr, colIndex) {
+    if (!tr || colIndex < 0) return "";
+    var cells = tr.querySelectorAll(":scope > td");
+    if (!cells.length) cells = tr.querySelectorAll("td");
+    if (colIndex >= cells.length) return "";
+    return (cells[colIndex].textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function findRowBySessionId(sessionId) {
+    try {
+      var nodes = document.querySelectorAll("tr[data-row-key]");
+      for (var i = 0; i < nodes.length; i++) {
+        if (nodes[i].getAttribute("data-row-key") === sessionId) return nodes[i];
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    return null;
+  }
+
+  function readRowMeta(sessionId) {
+    var cols = resolveColumnIndexes();
+    var tr = findRowBySessionId(sessionId);
+    var user = tr ? cellText(tr, cols.user) : "";
+    var recent = tr ? cellText(tr, cols.recent) : "";
+    if (!user) user = "unknown";
+    if (!recent) recent = "unknown";
+    // em-dash / placeholder
+    if (user === "—" || user === "-" || user === "–") user = "unknown";
+    if (recent === "—" || recent === "-" || recent === "–") recent = "unknown";
+    return { user: user, recent: recent, sessionId: sessionId };
+  }
+
   function readPageSessionIds() {
     var ids = [];
     var seen = Object.create(null);
@@ -407,6 +491,8 @@
         if (!id || seen[id]) continue;
         // skip placeholder / empty keys
         if (id === "null" || id === "undefined") continue;
+        // skip antd measure rows
+        if (nodes[i].classList && nodes[i].classList.contains("ant-table-measure-row")) continue;
         seen[id] = true;
         ids.push(id);
       }
@@ -495,6 +581,7 @@
       return;
     }
     ids.forEach(function (id) {
+      var meta = readRowMeta(id);
       var label = document.createElement("label");
       var input = document.createElement("input");
       input.type = "checkbox";
@@ -503,8 +590,9 @@
         onToggle(id, input.checked);
       });
       var span = document.createElement("span");
-      span.textContent = id.length > 28 ? id.slice(0, 12) + "…" + id.slice(-8) : id;
-      span.title = id;
+      var display = meta.user + "_" + meta.recent;
+      span.textContent = display.length > 36 ? display.slice(0, 34) + "…" : display;
+      span.title = display + "\n" + id + " → " + buildEntryFilename(meta.user, meta.recent, id, false);
       label.appendChild(input);
       label.appendChild(span);
       list.appendChild(label);
@@ -527,7 +615,7 @@
       '    <button type="button" id="a3-batch-qa-download" disabled>批量下载问答</button>',
       "  </div>",
       '  <div id="a3-batch-qa-list"></div>',
-      '  <div id="a3-batch-qa-status">勾选后打包 ZIP（与「下载问答」相同 brief）</div>',
+      '  <div id="a3-batch-qa-status">勾选后打包 ZIP；文件名=用户_最近一轮.txt</div>',
       "</div>",
       '<button type="button" id="a3-batch-qa-toggle">收起批量下载</button>',
     ].join("");
@@ -689,6 +777,7 @@
     VERSION: VERSION,
   };
 });
+
     if (window.A3ExecLogBatchQa) window.A3ExecLogBatchQa.start();
   } catch (err) {
     try { console.error("[a3-batch-qa] boot", err); } catch (e) {}

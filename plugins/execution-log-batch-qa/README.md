@@ -4,6 +4,8 @@
 
 > 浏览器插件（userscript / Chrome MV3），**不改** A3 产品仓库。鉴权复用当前登录态与 AUTO Token，仓库内无任何密钥。
 
+**v1.0.3：** ZIP 内文件名改为列表列 **用户_最近一轮.txt**（只读表头/单元格，不改表格 DOM）。
+
 **v1.0.2 安全模式：** 不劫持 `fetch` / `history`；不用 MutationObserver；**不往 Ant Table 插单元格**（避免骨架屏卡死）。右下角浮动面板 + 轮询读取 `tr[data-row-key]`。
 
 若页面只剩骨架屏：先在 `chrome://extensions` **禁用/移除本扩展** 并硬刷新即可恢复。
@@ -15,7 +17,7 @@
 | 勾选 / 全选本页 | 右下角面板列出本页 `data-row-key`（只读页面表格，不改 DOM 结构） |
 | 「批量下载问答」 | 对勾选会话逐个拉取与单行「下载问答」相同的 payload |
 | 打包 | `execution-qa-YYYYMMDD-HHmmss.zip` |
-| 条目命名 | 优先用响应 `Content-Disposition`；否则与页面一致：`execution-{sessionId}-brief.txt` |
+| 条目命名 | `{用户}_{最近一轮}.txt`（从列表列读取；非法字符清洗；重名追加短 session 后缀） |
 
 「下载全部」（`variant=detail`）不在本插件范围内。
 
