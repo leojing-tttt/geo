@@ -4,9 +4,11 @@
 
 > 浏览器插件（userscript / Chrome MV3），**不改** A3 产品仓库。鉴权复用当前登录态与 AUTO Token，仓库内无任何密钥。
 
-**v1.0.5：** **不再依赖 `/me/auto`**。`page-bridge.js` 在 `document_start` 截获页面发给 Agent 的 `Authorization`（与单行「下载问答」相同）；批量下载在 MAIN 执行。也可尝试登录 `localStorage.token` 直连 Agent；必要时自动点一次「下载问答」预热。
+**v1.0.6：** 修复批量后按钮一直灰、无 ZIP。根因：ISOLATED↔MAIN 仅靠 `postMessage` 不可靠 / 鉴权探活与单文件 `fetch` 无超时 → UI `busy` 永不清除。改为 **CustomEvent + postMessage**、桥接 2.5s 确认、鉴权 12s、单文件 20s、整批上限；失败必恢复按钮；部分成功也出 ZIP。
 
-**v1.0.4：** 曾尝试 MAIN 桥接 + `/me/auto`（仍可能 401，已由 1.0.5 取代）。
+**v1.0.5：** 不再依赖 `/me/auto`；MAIN 截获 Agent Authorization（仍可能因桥接/超时卡住，已由 1.0.6 修）。
+
+**v1.0.4：** 曾尝试 MAIN 桥接 + `/me/auto`（仍可能 401）。
 
 **v1.0.3：** ZIP 内文件名改为列表列 **用户_最近一轮.txt**（只读表头/单元格，不改表格 DOM）。
 

@@ -1,11 +1,11 @@
 /**
- * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.5+).
+ * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.6+).
  *
  * Safety rules (do NOT break page load):
  * - UI in ISOLATED: never MutationObserver / history rewrite / Ant Table cell injection
  * - Soft-poll for tr[data-row-key]; UI on document.body only
  * - Downloads + auth run in MAIN page-bridge (document_start fetch observe)
- * - Do NOT call /api/v1/sys/user-tokens/me/auto as primary path
+ * - ISOLATED↔MAIN via CustomEvent + postMessage; always clear busy on fail/timeout
  *
  * API (from production bundles):
  *   GET {agentBase}/admin/conversations/{sessionId}/download?variant=brief
@@ -28,9 +28,13 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  var VERSION = "1.0.5";
+  var VERSION = "1.0.6";
   var VARIANT = "brief";
   var POLL_MS = 1500;
+  var BRIDGE_ACK_MS = 2500;
+  var BATCH_OVERALL_BASE_MS = 35000;
+  var BATCH_OVERALL_PER_MS = 23000;
+  var BATCH_OVERALL_CAP_MS = 10 * 60 * 1000;
   var HOST_AGENT = {
     "a3-lib.a3database.cn": "https://agent.a3database.cn",
     "a3-pre-lib.a3database.cn": "https://agent.a3database.cn",
@@ -222,22 +226,123 @@
     return concatBytes(localParts.concat([centralDir, end]));
   }
 
-  /* ---- MAIN bridge (downloads happen in page-bridge; no /me/auto here) ---- */
+  /* ---- MAIN bridge (CustomEvent + postMessage; downloads in page-bridge) ---- */
   var BRIDGE_SOURCE = "a3-batch-qa";
+  var BRIDGE_EVENT = "__a3_batch_qa";
   var lastAuthPath = "";
-  var batchWaiters = [];
+  var bridgeSeen = false;
+  var activeBatch = null; // { requestId, resolve, reject, ackTimer, doneTimer }
+  var handledMsgIds = Object.create(null);
+
+  function newMsgId() {
+    return "m" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  }
 
   function postToBridge(msg) {
-    var payload = { source: BRIDGE_SOURCE };
+    var payload = { source: BRIDGE_SOURCE, msgId: newMsgId() };
     for (var k in msg) if (Object.prototype.hasOwnProperty.call(msg, k)) payload[k] = msg[k];
     try {
-      root.postMessage(payload, location.origin);
+      document.documentElement.dispatchEvent(
+        new CustomEvent(BRIDGE_EVENT, { detail: payload, bubbles: true })
+      );
     } catch (e) {
+      /* ignore */
+    }
+    try {
+      root.postMessage(payload, location.origin);
+    } catch (e2) {
       try {
         root.postMessage(payload, "*");
-      } catch (e2) {
+      } catch (e3) {
         /* ignore */
       }
+    }
+  }
+
+  function clearBusy(uiText, isError) {
+    busy = false;
+    try {
+      updateDownloadButton();
+    } catch (e) {
+      /* ignore */
+    }
+    if (uiText != null) setStatus(uiText, !!isError);
+  }
+
+  function finishActiveBatch(ok, text, data) {
+    var ab = activeBatch;
+    activeBatch = null;
+    if (ab) {
+      try {
+        clearTimeout(ab.ackTimer);
+      } catch (e) {
+        /* ignore */
+      }
+      try {
+        clearTimeout(ab.doneTimer);
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    clearBusy(text || (ok ? "完成" : "失败"), !ok);
+    if (!ab) return;
+    try {
+      if (ok) ab.resolve(data || { ok: true, text: text });
+      else ab.reject(new Error(text || "批量失败"));
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  function onBridgeMessage(d) {
+    if (!d || d.source !== BRIDGE_SOURCE) return;
+    if (d.msgId) {
+      if (handledMsgIds[d.msgId]) return;
+      handledMsgIds[d.msgId] = 1;
+    }
+    if (d.type === "bridge-ready" || d.type === "pong") {
+      bridgeSeen = true;
+      return;
+    }
+    if (d.type === "batch-status") {
+      setStatus(d.text || "", !!d.error);
+      return;
+    }
+    if (d.type === "batch-ack") {
+      bridgeSeen = true;
+      if (activeBatch && d.requestId && d.requestId === activeBatch.requestId) {
+        try {
+          clearTimeout(activeBatch.ackTimer);
+        } catch (e) {
+          /* ignore */
+        }
+        setStatus(
+          "桥接已确认（" +
+            (d.count != null ? d.count + " 个" : d.action || "ok") +
+            "），执行中…"
+        );
+      }
+      return;
+    }
+    if (d.type === "auth") {
+      bridgeSeen = true;
+      lastAuthPath = d.authPath || lastAuthPath;
+      if (d.ok === false) {
+        setStatus("鉴权未就绪：请先手动点一次「下载问答」，或再点「同步鉴权」", true);
+      } else if (d.hasAgentBearer) {
+        setStatus("页面 Agent 鉴权已就绪（" + (d.authPath || "captured") + "）");
+      } else if (d.bridge) {
+        setStatus(
+          "桥接在线 v" +
+            (d.version || "?") +
+            (d.hasAgentBearer ? "；已有 Bearer" : "；尚无 Bearer，批量时会截获")
+        );
+      }
+      return;
+    }
+    if (d.type === "batch-done") {
+      if (activeBatch && d.requestId && d.requestId !== activeBatch.requestId) return;
+      finishActiveBatch(!!d.ok, d.text || (d.ok ? "完成" : "失败"), d);
     }
   }
 
@@ -245,38 +350,20 @@
     if (root.__a3BatchQaBridgeListening) return;
     root.__a3BatchQaBridgeListening = true;
     try {
+      document.documentElement.addEventListener(BRIDGE_EVENT, function (ev) {
+        try {
+          onBridgeMessage(ev.detail);
+        } catch (e) {
+          /* ignore */
+        }
+      });
+    } catch (e) {
+      /* ignore */
+    }
+    try {
       root.addEventListener("message", function (ev) {
         try {
-          var d = ev.data;
-          if (!d || d.source !== BRIDGE_SOURCE) return;
-          if (d.type === "batch-status") {
-            setStatus(d.text || "", !!d.error);
-          } else if (d.type === "auth") {
-            lastAuthPath = d.authPath || lastAuthPath;
-            if (d.ok === false) {
-              setStatus(
-                "鉴权未就绪：请先手动点一次「下载问答」，或再点「同步鉴权」",
-                true
-              );
-            } else if (d.hasAgentBearer) {
-              setStatus("页面 Agent 鉴权已就绪（" + (d.authPath || "captured") + "）");
-            }
-          } else if (d.type === "batch-done") {
-            busy = false;
-            updateDownloadButton();
-            setStatus(d.text || (d.ok ? "完成" : "失败"), !d.ok);
-            var waiters = batchWaiters.splice(0, batchWaiters.length);
-            waiters.forEach(function (w) {
-              try {
-                if (d.ok) w.resolve(d);
-                else w.reject(new Error(d.text || "批量失败"));
-              } catch (e) {
-                /* ignore */
-              }
-            });
-          } else if (d.type === "bridge-ready") {
-            /* ok */
-          }
+          onBridgeMessage(ev.data);
         } catch (e) {
           /* ignore */
         }
@@ -523,7 +610,9 @@
       '    <button type="button" id="a3-batch-qa-download" disabled>批量下载问答</button>',
       "  </div>",
       '  <div id="a3-batch-qa-list"></div>',
-      '  <div id="a3-batch-qa-status">文件名=用户_最近一轮.txt；鉴权走页面 Agent 请求（勿依赖 /me/auto）</div>',
+      '  <div id="a3-batch-qa-status">v' +
+      VERSION +
+      ' · 文件名=用户_最近一轮.txt · 卡住会自动超时并恢复按钮</div>',
       "</div>",
       '<button type="button" id="a3-batch-qa-toggle">收起批量下载</button>',
     ].join("");
@@ -545,13 +634,18 @@
       setStatus("已清空选择");
     });
     document.getElementById("a3-batch-qa-refresh-auth").addEventListener("click", function () {
-      setStatus("正在截获页面鉴权（可能短暂触发一次「下载问答」）…");
+      setStatus("正在截获页面鉴权（限时 12s，可能触发一次「下载问答」）…");
       var first = selectedIds()[0] || (readPageSessionIds()[0] || "");
-      postToBridge({ type: "warm-auth", sessionId: first });
+      postToBridge({ type: "warm-auth", sessionId: first, requestId: newMsgId() });
+      setTimeout(function () {
+        if (!bridgeSeen) {
+          setStatus("桥接无响应：请移除旧扩展后加载 1.0.6，并硬刷新页面", true);
+        }
+      }, BRIDGE_ACK_MS);
     });
     document.getElementById("a3-batch-qa-download").addEventListener("click", function () {
       runBatch().catch(function (err) {
-        setStatus(String(err && err.message ? err.message : err), true);
+        clearBusy(String(err && err.message ? err.message : err), true);
       });
     });
     document.getElementById("a3-batch-qa-toggle").addEventListener("click", function () {
@@ -577,28 +671,61 @@
   function runBatch() {
     var ids = selectedIds();
     if (!ids.length || busy) return Promise.resolve();
+    if (activeBatch) {
+      clearBusy("上一批尚未结束，请稍候", true);
+      return Promise.resolve();
+    }
     busy = true;
     updateDownloadButton();
     var jobs = buildJobs(ids);
     var zipName = "execution-qa-" + zipStamp() + ".zip";
-    setStatus("已交由页面上下文下载 " + jobs.length + " 个会话…");
+    var requestId = newMsgId();
+    var overallMs = Math.min(
+      BATCH_OVERALL_CAP_MS,
+      BATCH_OVERALL_BASE_MS + jobs.length * BATCH_OVERALL_PER_MS
+    );
+    setStatus("发送批量任务 " + jobs.length + " 个到页面桥接…（等待确认 ≤" + BRIDGE_ACK_MS / 1000 + "s）");
+
     return new Promise(function (resolve, reject) {
-      batchWaiters.push({ resolve: resolve, reject: reject });
-      postToBridge({ type: "batch-run", jobs: jobs, zipName: zipName });
-      // safety timeout
-      setTimeout(function () {
-        if (!batchWaiters.length) return;
-        busy = false;
-        updateDownloadButton();
-        while (batchWaiters.length) {
-          var w = batchWaiters.shift();
-          try {
-            w.reject(new Error("批量超时：请刷新后先点一次「下载问答」，再重试"));
-          } catch (e) {
-            /* ignore */
-          }
-        }
-      }, 180000);
+      var ab = {
+        requestId: requestId,
+        resolve: resolve,
+        reject: reject,
+        ackTimer: null,
+        doneTimer: null,
+      };
+      activeBatch = ab;
+
+      ab.ackTimer = setTimeout(function () {
+        if (!activeBatch || activeBatch.requestId !== requestId) return;
+        finishActiveBatch(
+          false,
+          "页面桥接未响应（" +
+            BRIDGE_ACK_MS / 1000 +
+            "s）。请确认已安装 1.0.6、移除旧版后硬刷新；或先点一次「下载问答」。"
+        );
+      }, BRIDGE_ACK_MS);
+
+      ab.doneTimer = setTimeout(function () {
+        if (!activeBatch || activeBatch.requestId !== requestId) return;
+        finishActiveBatch(
+          false,
+          "批量超时（" +
+            Math.round(overallMs / 1000) +
+            "s）且无完成回调。按钮已恢复，可重试。"
+        );
+      }, overallMs);
+
+      try {
+        postToBridge({
+          type: "batch-run",
+          jobs: jobs,
+          zipName: zipName,
+          requestId: requestId,
+        });
+      } catch (err) {
+        finishActiveBatch(false, "发送桥接失败: " + (err && err.message ? err.message : err));
+      }
     });
   }
 
@@ -653,11 +780,21 @@
       if (started) return;
       started = true;
       installBridgeListener();
+      postToBridge({ type: "ping", requestId: newMsgId() });
       postToBridge({ type: "request-auth" });
+      setTimeout(function () {
+        if (!bridgeSeen) {
+          try {
+            setStatus("警告：未检测到页面桥接。请装 1.0.6 扩展并硬刷新本页。", true);
+          } catch (e) {
+            /* ignore */
+          }
+        }
+      }, 3000);
       tick();
       pollTimer = setInterval(tick, POLL_MS);
       try {
-        console.info("[a3-batch-qa] started v" + VERSION + " (MAIN download engine)");
+        console.info("[a3-batch-qa] started v" + VERSION + " (CustomEvent bridge + timeouts)");
       } catch (e) {
         /* ignore */
       }
