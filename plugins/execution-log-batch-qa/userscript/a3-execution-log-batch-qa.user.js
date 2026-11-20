@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         A3 执行记录 · 批量下载问答
 // @namespace    https://github.com/leojing-tttt/geo
-// @version      1.0.1
-// @description  在 Agent 中心「执行记录」勾选多行，批量下载「下载问答」txt 并打成 ZIP
+// @version      1.0.2
+// @description  在 Agent 中心「执行记录」批量下载「下载问答」并打成 ZIP（安全模式：不劫持 fetch/history、不改表格 DOM）
 // @author       geo plugin
 // @match        https://a3-lib.a3database.cn/*
 // @match        https://a3-pre-lib.a3database.cn/*
@@ -18,28 +18,41 @@
 
 (function () {
   "use strict";
+  try {
 /**
- * A3 Agent Center — execution-log batch 「下载问答」 core.
+ * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.2+).
  *
- * Discovered from production bundles (a3-lib.a3database.cn):
+ * Safety rules (do NOT break page load):
+ * - Never monkeypatch window.fetch / history.pushState / replaceState
+ * - Never MutationObserver on document (races React)
+ * - Never inject <td>/<th> into Ant Design Table (corrupts React tree → skeleton forever)
+ * - Soft-poll for tr[data-row-key]; UI lives on document.body only
+ * - All entry points wrapped in try/catch
+ *
+ * API (from production bundles):
  *   GET {agentBase}/admin/conversations/{sessionId}/download?variant=brief
- *   agentBase = https://agent.a3database.cn/scope  (prod host map)
- *   Auth: Authorization: Bearer <AUTO token>
- *   AUTO token: GET {apiBase}/api/v1/sys/user-tokens/me/auto  (cookie session)
- *   Filename: Content-Disposition, else execution-{sessionId}-brief.txt
- *
- * No secrets are stored; token is read from the live page session only.
+ *   Auth: Bearer AUTO token via localStorage.token → /api/v1/sys/user-tokens/me/auto
  */
 (function (root, factory) {
-  var api = factory();
-  if (typeof module === "object" && module.exports) {
-    module.exports = api;
+  try {
+    var api = factory();
+    if (typeof module === "object" && module.exports) {
+      module.exports = api;
+    }
+    root.A3ExecLogBatchQa = api;
+  } catch (err) {
+    try {
+      console.error("[a3-batch-qa] init failed", err);
+    } catch (e) {
+      /* ignore */
+    }
   }
-  root.A3ExecLogBatchQa = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
+  var VERSION = "1.0.2";
   var VARIANT = "brief";
+  var POLL_MS = 1500;
   var HOST_AGENT = {
     "a3-lib.a3database.cn": "https://agent.a3database.cn",
     "a3-pre-lib.a3database.cn": "https://agent.a3database.cn",
@@ -51,10 +64,11 @@
     "a3-test-lib.a3database.cn": "https://test-api.a3database.cn",
   };
 
-  var capturedBearer = "";
-  var uiInstalled = false;
   var selected = Object.create(null);
   var busy = false;
+  var started = false;
+  var pollTimer = null;
+  var lastPath = "";
 
   function agentBase() {
     var host = location.hostname;
@@ -68,13 +82,20 @@
   }
 
   function isExecLogPage() {
-    return /\/ai\/agent-center\/execution-log\/?$/.test(location.pathname);
+    try {
+      return /\/ai\/agent-center\/execution-log\/?$/.test(location.pathname);
+    } catch (e) {
+      return false;
+    }
   }
 
   function isListView() {
-    if (!isExecLogPage()) return false;
-    var params = new URLSearchParams(location.search);
-    return !params.get("sessionId");
+    try {
+      if (!isExecLogPage()) return false;
+      return !new URLSearchParams(location.search).get("sessionId");
+    } catch (e) {
+      return false;
+    }
   }
 
   function parseFilenameFromDisposition(header) {
@@ -120,7 +141,7 @@
     );
   }
 
-  /* ---- minimal ZIP (STORE, no compression) ---- */
+  /* ---- minimal ZIP (STORE) ---- */
   function crcTable() {
     var table = new Uint32Array(256);
     for (var n = 0; n < 256; n++) {
@@ -161,7 +182,6 @@
   }
 
   function buildZip(entries) {
-    // entries: [{name, data:Uint8Array}]
     var localParts = [];
     var centralParts = [];
     var offset = 0;
@@ -182,8 +202,8 @@
       var localHeader = concatBytes([
         new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
         new Uint8Array(u16(20)),
-        new Uint8Array(u16(0x0800)), // UTF-8 flag
-        new Uint8Array(u16(0)), // store
+        new Uint8Array(u16(0x0800)),
+        new Uint8Array(u16(0)),
         new Uint8Array(u16(dosTime)),
         new Uint8Array(u16(dosDate)),
         new Uint8Array(u32(crc)),
@@ -233,41 +253,18 @@
     return concatBytes(localParts.concat([centralDir, end]));
   }
 
-  /* ---- auth ---- */
+  /* ---- auth (no fetch monkeypatch) ---- */
+  var capturedBearer = "";
+
   function rememberBearer(value) {
     if (!value) return;
     var m = String(value).match(/^\s*Bearer\s+(.+)\s*$/i);
     capturedBearer = (m ? m[1] : value).trim();
   }
 
-  function installAuthCapture() {
-    if (root.__a3BatchQaFetchHooked) return;
-    root.__a3BatchQaFetchHooked = true;
-    var origFetch = root.fetch;
-    if (typeof origFetch !== "function") return;
-    root.fetch = function (input, init) {
-      try {
-        var url = typeof input === "string" ? input : input && input.url;
-        var headers = (init && init.headers) || (input && input.headers);
-        if (url && /agent(-test)?\.a3database\.cn/.test(String(url))) {
-          var auth = null;
-          if (headers) {
-            if (typeof headers.get === "function") auth = headers.get("Authorization") || headers.get("authorization");
-            else if (headers.Authorization || headers.authorization) auth = headers.Authorization || headers.authorization;
-          }
-          if (auth) rememberBearer(auth);
-        }
-      } catch (e) {
-        /* ignore */
-      }
-      return origFetch.apply(this, arguments);
-    };
-  }
-
   function readLoginToken() {
     try {
-      // Same key as A3 lib request interceptor: localStorage["token"]
-      return (window.localStorage && window.localStorage.getItem("token")) || "";
+      return (root.localStorage && root.localStorage.getItem("token")) || "";
     } catch (e) {
       return "";
     }
@@ -275,7 +272,6 @@
 
   function extractAutoToken(json) {
     if (!json || typeof json !== "object") return "";
-    // Common shapes: { code:200, data:{ token } } or alova-unwrapped { data:{ token } } / { token }
     if (json.data && typeof json.data === "object" && json.data.token) return String(json.data.token);
     if (json.token) return String(json.token);
     return "";
@@ -299,7 +295,6 @@
     } catch (e) {
       json = null;
     }
-    // API may return HTTP 200 with { code:401, ... }
     var bizCode = json && json.code;
     if (!res.ok || (bizCode != null && bizCode !== 200 && !extractAutoToken(json))) {
       throw new Error(
@@ -393,27 +388,66 @@
     a.click();
     a.remove();
     setTimeout(function () {
-      URL.revokeObjectURL(url);
+      try {
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        /* ignore */
+      }
     }, 2000);
   }
 
-  /* ---- UI ---- */
+  /* ---- DOM helpers (read-only on page table) ---- */
+  function readPageSessionIds() {
+    var ids = [];
+    var seen = Object.create(null);
+    try {
+      var nodes = document.querySelectorAll("tr[data-row-key]");
+      for (var i = 0; i < nodes.length; i++) {
+        var id = nodes[i].getAttribute("data-row-key");
+        if (!id || seen[id]) continue;
+        // skip placeholder / empty keys
+        if (id === "null" || id === "undefined") continue;
+        seen[id] = true;
+        ids.push(id);
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    return ids;
+  }
+
+  function pageHasLoadedRows() {
+    return readPageSessionIds().length > 0;
+  }
+
+  /* ---- UI (body-mounted only; never touch Ant table cells) ---- */
   function css() {
     return [
-      ".a3-batch-qa-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;",
-      "margin:0 0 12px;padding:10px 12px;border:1px solid #d9d9d9;border-radius:6px;",
-      "background:#fafafa;font-size:13px;color:#262626}",
-      ".a3-batch-qa-bar button{appearance:none;border:1px solid #1677ff;background:#1677ff;color:#fff;",
-      "border-radius:4px;padding:4px 12px;cursor:pointer;font-size:13px;line-height:1.5}",
-      ".a3-batch-qa-bar button[disabled]{opacity:.55;cursor:not-allowed}",
-      ".a3-batch-qa-bar button.a3-batch-qa-secondary{background:#fff;color:#1677ff}",
-      ".a3-batch-qa-bar .a3-batch-qa-status{color:#595959}",
-      ".a3-batch-qa-bar .a3-batch-qa-error{color:#cf1322}",
-      ".a3-batch-qa-check{display:inline-flex;align-items:center;justify-content:center;",
-      "width:18px;margin-right:6px;vertical-align:middle}",
-      ".a3-batch-qa-check input{width:14px;height:14px;cursor:pointer}",
-      "th.a3-batch-qa-th{width:42px !important;padding-left:8px !important;padding-right:0 !important}",
-      "td.a3-batch-qa-td{width:42px !important;padding-left:8px !important;padding-right:0 !important}",
+      "#a3-batch-qa-root{all:initial;position:fixed;z-index:2147483000;right:16px;bottom:16px;",
+      "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;",
+      "font-size:13px;line-height:1.4;color:#262626}",
+      "#a3-batch-qa-root *{box-sizing:border-box;font-family:inherit}",
+      "#a3-batch-qa-panel{width:320px;max-height:min(70vh,520px);display:flex;flex-direction:column;",
+      "background:#fff;border:1px solid #d9d9d9;border-radius:8px;",
+      "box-shadow:0 6px 24px rgba(0,0,0,.12);overflow:hidden}",
+      "#a3-batch-qa-panel header{display:flex;align-items:center;justify-content:space-between;",
+      "padding:10px 12px;border-bottom:1px solid #f0f0f0;background:#fafafa}",
+      "#a3-batch-qa-panel header strong{font-size:13px}",
+      "#a3-batch-qa-panel .a3-batch-qa-actions{display:flex;flex-wrap:wrap;gap:8px;padding:10px 12px;",
+      "border-bottom:1px solid #f0f0f0}",
+      "#a3-batch-qa-panel button{appearance:none;border:1px solid #1677ff;background:#1677ff;color:#fff;",
+      "border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px}",
+      "#a3-batch-qa-panel button[disabled]{opacity:.55;cursor:not-allowed}",
+      "#a3-batch-qa-panel button.secondary{background:#fff;color:#1677ff}",
+      "#a3-batch-qa-list{overflow:auto;padding:8px 12px;flex:1;min-height:80px}",
+      "#a3-batch-qa-list label{display:flex;align-items:flex-start;gap:8px;padding:4px 0;",
+      "cursor:pointer;word-break:break-all}",
+      "#a3-batch-qa-list input{margin-top:2px;flex:none}",
+      "#a3-batch-qa-status{padding:8px 12px;border-top:1px solid #f0f0f0;color:#595959;font-size:12px}",
+      "#a3-batch-qa-status.is-error{color:#cf1322}",
+      "#a3-batch-qa-toggle{margin-top:8px;width:100%;border:1px solid #d9d9d9;background:#fff;color:#262626;",
+      "border-radius:8px;padding:8px 10px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.1)}",
+      "#a3-batch-qa-empty{color:#8c8c8c;padding:12px 0}",
     ].join("");
   }
 
@@ -422,14 +456,14 @@
     var style = document.createElement("style");
     style.id = "a3-batch-qa-style";
     style.textContent = css();
-    document.documentElement.appendChild(style);
+    (document.head || document.documentElement).appendChild(style);
   }
 
   function setStatus(text, isError) {
     var el = document.getElementById("a3-batch-qa-status");
     if (!el) return;
     el.textContent = text || "";
-    el.className = "a3-batch-qa-status" + (isError ? " a3-batch-qa-error" : "");
+    el.className = isError ? "is-error" : "";
   }
 
   function selectedIds() {
@@ -438,79 +472,112 @@
     });
   }
 
-  function updateCount() {
+  function updateDownloadButton() {
     var btn = document.getElementById("a3-batch-qa-download");
+    if (!btn) return;
     var n = selectedIds().length;
-    if (btn) {
-      btn.textContent = n ? "批量下载问答（" + n + "）" : "批量下载问答";
-      btn.disabled = busy || n === 0;
-    }
+    btn.textContent = n ? "批量下载问答（" + n + "）" : "批量下载问答";
+    btn.disabled = busy || n === 0;
   }
 
   function onToggle(sessionId, checked) {
     if (checked) selected[sessionId] = true;
     else delete selected[sessionId];
-    updateCount();
+    updateDownloadButton();
   }
 
-  function findTable() {
-    return document.querySelector(".exec-log__table table") || document.querySelector(".exec-log table");
-  }
-
-  function injectHeaderCheckbox(table) {
-    var thead = table.querySelector("thead tr");
-    if (!thead || thead.querySelector(".a3-batch-qa-th")) return;
-    var th = document.createElement("th");
-    th.className = "a3-batch-qa-th ant-table-cell";
-    th.innerHTML =
-      '<label class="a3-batch-qa-check" title="全选本页"><input type="checkbox" id="a3-batch-qa-all" /></label>';
-    thead.insertBefore(th, thead.firstChild);
-    th.querySelector("input").addEventListener("click", function (e) {
-      e.stopPropagation();
-    });
-    th.querySelector("input").addEventListener("change", function (e) {
-      var checked = e.target.checked;
-      table.querySelectorAll("tbody tr[data-row-key]").forEach(function (tr) {
-        var id = tr.getAttribute("data-row-key");
-        var box = tr.querySelector(".a3-batch-qa-row-check");
-        if (box) box.checked = checked;
-        onToggle(id, checked);
-      });
-    });
-  }
-
-  function injectRowCheckboxes(table) {
-    table.querySelectorAll("tbody tr[data-row-key]").forEach(function (tr) {
-      if (tr.querySelector(".a3-batch-qa-td")) {
-        var existing = tr.querySelector(".a3-batch-qa-row-check");
-        var id = tr.getAttribute("data-row-key");
-        if (existing) existing.checked = !!selected[id];
-        return;
-      }
-      var id = tr.getAttribute("data-row-key");
-      if (!id) return;
-      var td = document.createElement("td");
-      td.className = "a3-batch-qa-td ant-table-cell";
-      td.innerHTML =
-        '<label class="a3-batch-qa-check"><input type="checkbox" class="a3-batch-qa-row-check" /></label>';
-      var input = td.querySelector("input");
+  function renderSessionList(ids) {
+    var list = document.getElementById("a3-batch-qa-list");
+    if (!list) return;
+    list.innerHTML = "";
+    if (!ids.length) {
+      list.innerHTML = '<div id="a3-batch-qa-empty">等待列表加载…（出现会话行后可勾选）</div>';
+      return;
+    }
+    ids.forEach(function (id) {
+      var label = document.createElement("label");
+      var input = document.createElement("input");
+      input.type = "checkbox";
       input.checked = !!selected[id];
-      input.addEventListener("click", function (e) {
-        e.stopPropagation();
+      input.addEventListener("change", function () {
+        onToggle(id, input.checked);
       });
-      input.addEventListener("change", function (e) {
-        e.stopPropagation();
-        onToggle(id, e.target.checked);
-      });
-      tr.insertBefore(td, tr.firstChild);
+      var span = document.createElement("span");
+      span.textContent = id.length > 28 ? id.slice(0, 12) + "…" + id.slice(-8) : id;
+      span.title = id;
+      label.appendChild(input);
+      label.appendChild(span);
+      list.appendChild(label);
     });
+  }
+
+  function ensurePanel() {
+    if (document.getElementById("a3-batch-qa-root")) return;
+    ensureStyles();
+    var rootEl = document.createElement("div");
+    rootEl.id = "a3-batch-qa-root";
+    rootEl.innerHTML = [
+      '<div id="a3-batch-qa-panel">',
+      "  <header><strong>批量下载问答</strong><span style=\"color:#8c8c8c;font-size:11px\">v" +
+        VERSION +
+        "</span></header>",
+      '  <div class="a3-batch-qa-actions">',
+      '    <button type="button" class="secondary" id="a3-batch-qa-select-page">全选本页</button>',
+      '    <button type="button" class="secondary" id="a3-batch-qa-clear">清空</button>',
+      '    <button type="button" id="a3-batch-qa-download" disabled>批量下载问答</button>',
+      "  </div>",
+      '  <div id="a3-batch-qa-list"></div>',
+      '  <div id="a3-batch-qa-status">勾选后打包 ZIP（与「下载问答」相同 brief）</div>',
+      "</div>",
+      '<button type="button" id="a3-batch-qa-toggle">收起批量下载</button>',
+    ].join("");
+    document.body.appendChild(rootEl);
+
+    document.getElementById("a3-batch-qa-select-page").addEventListener("click", function () {
+      try {
+        readPageSessionIds().forEach(function (id) {
+          selected[id] = true;
+        });
+        tick();
+      } catch (e) {
+        setStatus(String(e && e.message ? e.message : e), true);
+      }
+    });
+    document.getElementById("a3-batch-qa-clear").addEventListener("click", function () {
+      selected = Object.create(null);
+      tick();
+      setStatus("已清空选择");
+    });
+    document.getElementById("a3-batch-qa-download").addEventListener("click", function () {
+      runBatch().catch(function (err) {
+        setStatus(String(err && err.message ? err.message : err), true);
+      });
+    });
+    document.getElementById("a3-batch-qa-toggle").addEventListener("click", function () {
+      var panel = document.getElementById("a3-batch-qa-panel");
+      var btn = document.getElementById("a3-batch-qa-toggle");
+      if (!panel || !btn) return;
+      var hide = panel.style.display !== "none";
+      panel.style.display = hide ? "none" : "";
+      btn.textContent = hide ? "展开批量下载问答" : "收起批量下载";
+    });
+  }
+
+  function hidePanel() {
+    var rootEl = document.getElementById("a3-batch-qa-root");
+    if (rootEl) rootEl.style.display = "none";
+  }
+
+  function showPanel() {
+    var rootEl = document.getElementById("a3-batch-qa-root");
+    if (rootEl) rootEl.style.display = "";
   }
 
   async function runBatch() {
     var ids = selectedIds();
     if (!ids.length || busy) return;
     busy = true;
-    updateCount();
+    updateDownloadButton();
     setStatus("准备下载 " + ids.length + " 个会话…");
     var files = [];
     var errors = [];
@@ -542,76 +609,75 @@
       console.error("[a3-batch-qa]", err);
     } finally {
       busy = false;
-      updateCount();
+      updateDownloadButton();
     }
   }
 
-  function ensureToolbar(anchor) {
-    if (document.getElementById("a3-batch-qa-bar")) return;
-    var bar = document.createElement("div");
-    bar.id = "a3-batch-qa-bar";
-    bar.className = "a3-batch-qa-bar";
-    bar.innerHTML = [
-      '<strong>批量下载问答</strong>',
-      '<button type="button" class="a3-batch-qa-secondary" id="a3-batch-qa-clear">清空选择</button>',
-      '<button type="button" id="a3-batch-qa-download" disabled>批量下载问答</button>',
-      '<span id="a3-batch-qa-status" class="a3-batch-qa-status">勾选行后打包为 ZIP（variant=brief，与「下载问答」相同）</span>',
-    ].join("");
-    anchor.parentNode.insertBefore(bar, anchor);
-    document.getElementById("a3-batch-qa-clear").addEventListener("click", function () {
-      selected = Object.create(null);
-      document.querySelectorAll(".a3-batch-qa-row-check, #a3-batch-qa-all").forEach(function (el) {
-        el.checked = false;
-      });
-      updateCount();
-      setStatus("已清空选择");
-    });
-    document.getElementById("a3-batch-qa-download").addEventListener("click", function () {
-      runBatch();
-    });
-  }
+  function tick() {
+    try {
+      var pathKey = location.pathname + location.search;
+      if (pathKey !== lastPath) {
+        lastPath = pathKey;
+        // drop stale selections when leaving list
+        if (!isListView()) selected = Object.create(null);
+      }
 
-  function syncUi() {
-    if (!isListView()) {
-      var bar = document.getElementById("a3-batch-qa-bar");
-      if (bar) bar.style.display = "none";
-      return;
+      if (!isListView()) {
+        hidePanel();
+        return;
+      }
+
+      // Defer UI until React has painted real rows — never mutate early
+      if (!pageHasLoadedRows()) {
+        // still show a collapsed hint only after exec-log shell exists
+        var shell =
+          document.querySelector(".exec-log") ||
+          document.querySelector(".ai-page-board") ||
+          document.querySelector(".exec-log__table");
+        if (!shell) {
+          hidePanel();
+          return;
+        }
+        ensurePanel();
+        showPanel();
+        renderSessionList([]);
+        updateDownloadButton();
+        setStatus("列表加载中…加载出会话行后再勾选");
+        return;
+      }
+
+      ensurePanel();
+      showPanel();
+      renderSessionList(readPageSessionIds());
+      updateDownloadButton();
+    } catch (err) {
+      try {
+        console.error("[a3-batch-qa] tick", err);
+      } catch (e) {
+        /* ignore */
+      }
     }
-    ensureStyles();
-    var tableWrap = document.querySelector(".exec-log__table");
-    if (!tableWrap) return;
-    ensureToolbar(tableWrap);
-    var bar = document.getElementById("a3-batch-qa-bar");
-    if (bar) bar.style.display = "";
-    var table = findTable();
-    if (!table) return;
-    injectHeaderCheckbox(table);
-    injectRowCheckboxes(table);
-    updateCount();
   }
 
   function start() {
-    installAuthCapture();
-    if (uiInstalled) return;
-    uiInstalled = true;
-    syncUi();
-    var obs = new MutationObserver(function () {
-      syncUi();
-    });
-    obs.observe(document.documentElement, { childList: true, subtree: true });
-    root.addEventListener("popstate", syncUi);
-    var _push = history.pushState;
-    var _replace = history.replaceState;
-    history.pushState = function () {
-      var r = _push.apply(this, arguments);
-      setTimeout(syncUi, 0);
-      return r;
-    };
-    history.replaceState = function () {
-      var r = _replace.apply(this, arguments);
-      setTimeout(syncUi, 0);
-      return r;
-    };
+    try {
+      if (started) return;
+      started = true;
+      // Soft polling only — no history rewrite, no MutationObserver, no fetch patch
+      tick();
+      pollTimer = setInterval(tick, POLL_MS);
+      try {
+        console.info("[a3-batch-qa] started v" + VERSION + " (safe mode)");
+      } catch (e) {
+        /* ignore */
+      }
+    } catch (err) {
+      try {
+        console.error("[a3-batch-qa] start failed", err);
+      } catch (e) {
+        /* ignore */
+      }
+    }
   }
 
   return {
@@ -620,8 +686,11 @@
     apiBase: apiBase,
     downloadBrief: downloadBrief,
     VARIANT: VARIANT,
+    VERSION: VERSION,
   };
 });
-
-  if (window.A3ExecLogBatchQa) window.A3ExecLogBatchQa.start();
+    if (window.A3ExecLogBatchQa) window.A3ExecLogBatchQa.start();
+  } catch (err) {
+    try { console.error("[a3-batch-qa] boot", err); } catch (e) {}
+  }
 })();

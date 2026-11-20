@@ -4,11 +4,15 @@
 
 > 浏览器插件（userscript / Chrome MV3），**不改** A3 产品仓库。鉴权复用当前登录态与 AUTO Token，仓库内无任何密钥。
 
+**v1.0.2 安全模式：** 不劫持 `fetch` / `history`；不用 MutationObserver；**不往 Ant Table 插单元格**（避免骨架屏卡死）。右下角浮动面板 + 轮询读取 `tr[data-row-key]`。
+
+若页面只剩骨架屏：先在 `chrome://extensions` **禁用/移除本扩展** 并硬刷新即可恢复。
+
 ## 行为
 
 | 能力 | 说明 |
 |------|------|
-| 行勾选 / 全选本页 | 注入到 Ant Table（`data-row-key` = `sessionId`） |
+| 勾选 / 全选本页 | 右下角面板列出本页 `data-row-key`（只读页面表格，不改 DOM 结构） |
 | 「批量下载问答」 | 对勾选会话逐个拉取与单行「下载问答」相同的 payload |
 | 打包 | `execution-qa-YYYYMMDD-HHmmss.zip` |
 | 条目命名 | 优先用响应 `Content-Disposition`；否则与页面一致：`execution-{sessionId}-brief.txt` |
@@ -35,11 +39,9 @@ Host 映射与页面一致：
 | `a3-pre-lib.a3database.cn` | `https://pre-api.a3database.cn` | `https://agent.a3database.cn/scope` |
 | `a3-test-lib.a3database.cn` | `https://test-api.a3database.cn` | `https://agent-test.a3database.cn/scope` |
 
-插件会：
+插件会读取页面登录态 `localStorage.token`，请求 `/api/v1/sys/user-tokens/me/auto` 换取 AUTO Token（与页面「我的令牌」同源逻辑）。不劫持页面 `fetch`。仓库不保存、不提交任何 token。
 
-1. 拦截页面向 Agent 域名发出的 `Authorization`（若已有 AUTO Bearer）；
-2. 否则读取页面登录态 `localStorage.token`，请求 `/api/v1/sys/user-tokens/me/auto` 换取 AUTO Token（与页面「我的令牌」同源逻辑）。  
-   仓库不保存、不提交任何 token。
+Chrome 扩展使用默认 **ISOLATED** content script（不再 `world: MAIN`）。
 
 ## 安装
 
@@ -67,7 +69,7 @@ plugins/execution-log-batch-qa/
 ├── shared/batch-qa-core.js          # 共用逻辑（ZIP STORE、鉴权、UI）
 ├── userscript/a3-execution-log-batch-qa.user.js
 └── extension/
-    ├── manifest.json                # MV3 + world: MAIN
+    ├── manifest.json                # MV3（ISOLATED，默认）
     └── content.js
 ```
 
