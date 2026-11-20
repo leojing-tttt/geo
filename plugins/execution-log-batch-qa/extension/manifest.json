@@ -1,12 +1,16 @@
 {
   "manifest_version": 3,
   "name": "A3 执行记录 · 批量下载问答",
-  "version": "1.0.6",
-  "description": "批量下载「下载问答」；CustomEvent 桥接 + 超时恢复 + 部分 ZIP",
+  "version": "1.0.7",
+  "description": "批量下载「下载问答」；background 绕过 CORS；条目名=用户_最近一轮.txt",
   "icons": {},
   "action": {
     "default_title": "A3 批量下载问答"
   },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["downloads"],
   "host_permissions": [
     "https://a3-lib.a3database.cn/*",
     "https://a3-pre-lib.a3database.cn/*",

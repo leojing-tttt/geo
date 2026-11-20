@@ -1,15 +1,14 @@
 /**
- * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.6+).
+ * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.7+).
  *
  * Safety rules (do NOT break page load):
  * - UI in ISOLATED: never MutationObserver / history rewrite / Ant Table cell injection
  * - Soft-poll for tr[data-row-key]; UI on document.body only
- * - Downloads + auth run in MAIN page-bridge (document_start fetch observe)
- * - ISOLATED↔MAIN via CustomEvent + postMessage; always clear busy on fail/timeout
+ * - MAIN bridge only captures Bearer; downloads via MV3 background (no page CORS)
+ * - ISOLATED↔MAIN via CustomEvent; ISOLATED→background via chrome.runtime
  *
- * API (from production bundles):
+ * API:
  *   GET {agentBase}/admin/conversations/{sessionId}/download?variant=brief
- *   Authorization: same Bearer the page attaches to Agent requests
  */
 (function (root, factory) {
   try {
@@ -28,13 +27,16 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  var VERSION = "1.0.6";
+  var VERSION = "1.0.7";
   var VARIANT = "brief";
   var POLL_MS = 1500;
   var BRIDGE_ACK_MS = 2500;
-  var BATCH_OVERALL_BASE_MS = 35000;
-  var BATCH_OVERALL_PER_MS = 23000;
-  var BATCH_OVERALL_CAP_MS = 10 * 60 * 1000;
+  var AUTH_WAIT_MS = 14000;
+  var BATCH_OVERALL_BASE_MS = 40000;
+  var BATCH_OVERALL_PER_MS = 28000;
+  var BATCH_OVERALL_CAP_MS = 12 * 60 * 1000;
+  var hasExtensionRuntime =
+    typeof chrome !== "undefined" && chrome.runtime && typeof chrome.runtime.sendMessage === "function";
   var HOST_AGENT = {
     "a3-lib.a3database.cn": "https://agent.a3database.cn",
     "a3-pre-lib.a3database.cn": "https://agent.a3database.cn",
@@ -226,12 +228,14 @@
     return concatBytes(localParts.concat([centralDir, end]));
   }
 
-  /* ---- MAIN bridge (CustomEvent + postMessage; downloads in page-bridge) ---- */
+  /* ---- MAIN auth bridge + MV3 background downloads ---- */
   var BRIDGE_SOURCE = "a3-batch-qa";
   var BRIDGE_EVENT = "__a3_batch_qa";
   var lastAuthPath = "";
   var bridgeSeen = false;
+  var bgSeen = false;
   var activeBatch = null; // { requestId, resolve, reject, ackTimer, doneTimer }
+  var pendingBearer = null; // { requestId, resolve, reject, timer }
   var handledMsgIds = Object.create(null);
 
   function newMsgId() {
@@ -317,7 +321,7 @@
           /* ignore */
         }
         setStatus(
-          "桥接已确认（" +
+          "已确认（" +
             (d.count != null ? d.count + " 个" : d.action || "ok") +
             "），执行中…"
         );
@@ -330,19 +334,62 @@
       if (d.ok === false) {
         setStatus("鉴权未就绪：请先手动点一次「下载问答」，或再点「同步鉴权」", true);
       } else if (d.hasAgentBearer) {
-        setStatus("页面 Agent 鉴权已就绪（" + (d.authPath || "captured") + "）");
+        setStatus("页面 Agent 鉴权已就绪（" + (d.authPath || "captured") + "）→ 后台下载");
       } else if (d.bridge) {
         setStatus(
           "桥接在线 v" +
             (d.version || "?") +
-            (d.hasAgentBearer ? "；已有 Bearer" : "；尚无 Bearer，批量时会截获")
+            "；下载走扩展后台（防 CORS）" +
+            (d.hasAgentBearer ? "；已有 Bearer" : "")
         );
+      }
+      return;
+    }
+    if (d.type === "bearer") {
+      if (pendingBearer && (!d.requestId || d.requestId === pendingBearer.requestId)) {
+        var pb = pendingBearer;
+        pendingBearer = null;
+        try {
+          clearTimeout(pb.timer);
+        } catch (e) {
+          /* ignore */
+        }
+        if (d.ok && d.bearer) {
+          lastAuthPath = d.authPath || lastAuthPath;
+          pb.resolve({ bearer: String(d.bearer), authPath: d.authPath || lastAuthPath });
+        } else {
+          pb.reject(new Error(d.error || "未获得 Bearer"));
+        }
       }
       return;
     }
     if (d.type === "batch-done") {
       if (activeBatch && d.requestId && d.requestId !== activeBatch.requestId) return;
       finishActiveBatch(!!d.ok, d.text || (d.ok ? "完成" : "失败"), d);
+    }
+  }
+
+  function onBackgroundMessage(msg) {
+    try {
+      if (!msg || msg.source !== "a3-batch-qa-bg") return;
+      bgSeen = true;
+      if (msg.type === "batch-status") {
+        setStatus(msg.text || "", !!msg.error);
+      } else if (msg.type === "batch-ack") {
+        if (activeBatch && msg.requestId === activeBatch.requestId) {
+          try {
+            clearTimeout(activeBatch.ackTimer);
+          } catch (e) {
+            /* ignore */
+          }
+          setStatus("后台已确认批量 " + (msg.count != null ? msg.count : "") + " 个…");
+        }
+      } else if (msg.type === "batch-done") {
+        if (activeBatch && msg.requestId && msg.requestId !== activeBatch.requestId) return;
+        finishActiveBatch(!!msg.ok, msg.text || (msg.ok ? "完成" : "失败"), msg);
+      }
+    } catch (e) {
+      /* ignore */
     }
   }
 
@@ -371,6 +418,51 @@
     } catch (e) {
       /* ignore */
     }
+    if (hasExtensionRuntime) {
+      try {
+        chrome.runtime.onMessage.addListener(function (msg) {
+          onBackgroundMessage(msg);
+        });
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+
+  function requestBearer(sessionId) {
+    return new Promise(function (resolve, reject) {
+      var requestId = newMsgId();
+      pendingBearer = {
+        requestId: requestId,
+        resolve: resolve,
+        reject: reject,
+        timer: setTimeout(function () {
+          if (!pendingBearer || pendingBearer.requestId !== requestId) return;
+          pendingBearer = null;
+          reject(new Error("鉴权超时：请先手动点一次「下载问答」"));
+        }, AUTH_WAIT_MS),
+      };
+      postToBridge({ type: "ensure-auth", sessionId: sessionId || "", requestId: requestId });
+    });
+  }
+
+  function sendToBackground(payload) {
+    return new Promise(function (resolve, reject) {
+      try {
+        chrome.runtime.sendMessage(
+          Object.assign({ source: BRIDGE_SOURCE }, payload),
+          function (resp) {
+            if (chrome.runtime.lastError) {
+              reject(new Error(chrome.runtime.lastError.message || "background 无响应"));
+              return;
+            }
+            resolve(resp);
+          }
+        );
+      } catch (err) {
+        reject(err);
+      }
+    });
   }
 
   function buildEntryFilename(user, recent, sessionId, withSessionSuffix) {
@@ -612,7 +704,7 @@
       '  <div id="a3-batch-qa-list"></div>',
       '  <div id="a3-batch-qa-status">v' +
       VERSION +
-      ' · 文件名=用户_最近一轮.txt · 卡住会自动超时并恢复按钮</div>',
+      ' · 后台下载防 CORS · 文件名=用户_最近一轮.txt</div>',
       "</div>",
       '<button type="button" id="a3-batch-qa-toggle">收起批量下载</button>',
     ].join("");
@@ -634,12 +726,18 @@
       setStatus("已清空选择");
     });
     document.getElementById("a3-batch-qa-refresh-auth").addEventListener("click", function () {
-      setStatus("正在截获页面鉴权（限时 12s，可能触发一次「下载问答」）…");
+      setStatus("正在截获页面鉴权（可能触发一次「下载问答」）…");
       var first = selectedIds()[0] || (readPageSessionIds()[0] || "");
-      postToBridge({ type: "warm-auth", sessionId: first, requestId: newMsgId() });
+      requestBearer(first)
+        .then(function (r) {
+          setStatus("鉴权就绪（" + (r.authPath || "captured") + "），可批量（走扩展后台）");
+        })
+        .catch(function (err) {
+          setStatus(String(err && err.message ? err.message : err), true);
+        });
       setTimeout(function () {
         if (!bridgeSeen) {
-          setStatus("桥接无响应：请移除旧扩展后加载 1.0.6，并硬刷新页面", true);
+          setStatus("桥接无响应：请加载 1.0.7 扩展并硬刷新", true);
         }
       }, BRIDGE_ACK_MS);
     });
@@ -675,6 +773,14 @@
       clearBusy("上一批尚未结束，请稍候", true);
       return Promise.resolve();
     }
+    if (!hasExtensionRuntime) {
+      clearBusy(
+        "当前环境无扩展 background（CORS 无法从页面直连 Agent）。请安装 Chrome 扩展 1.0.7。",
+        true
+      );
+      return Promise.resolve();
+    }
+
     busy = true;
     updateDownloadButton();
     var jobs = buildJobs(ids);
@@ -684,7 +790,6 @@
       BATCH_OVERALL_CAP_MS,
       BATCH_OVERALL_BASE_MS + jobs.length * BATCH_OVERALL_PER_MS
     );
-    setStatus("发送批量任务 " + jobs.length + " 个到页面桥接…（等待确认 ≤" + BRIDGE_ACK_MS / 1000 + "s）");
 
     return new Promise(function (resolve, reject) {
       var ab = {
@@ -696,36 +801,46 @@
       };
       activeBatch = ab;
 
-      ab.ackTimer = setTimeout(function () {
-        if (!activeBatch || activeBatch.requestId !== requestId) return;
-        finishActiveBatch(
-          false,
-          "页面桥接未响应（" +
-            BRIDGE_ACK_MS / 1000 +
-            "s）。请确认已安装 1.0.6、移除旧版后硬刷新；或先点一次「下载问答」。"
-        );
-      }, BRIDGE_ACK_MS);
-
       ab.doneTimer = setTimeout(function () {
         if (!activeBatch || activeBatch.requestId !== requestId) return;
         finishActiveBatch(
           false,
-          "批量超时（" +
-            Math.round(overallMs / 1000) +
-            "s）且无完成回调。按钮已恢复，可重试。"
+          "批量超时（" + Math.round(overallMs / 1000) + "s）。按钮已恢复，可重试。"
         );
       }, overallMs);
 
-      try {
-        postToBridge({
-          type: "batch-run",
-          jobs: jobs,
-          zipName: zipName,
+      (async function () {
+        setStatus("1/3 截获页面 Agent Bearer…");
+        var auth = await requestBearer(jobs[0].sessionId);
+        setStatus("2/3 鉴权就绪（" + (auth.authPath || "captured") + "），交由扩展后台下载…");
+
+        ab.ackTimer = setTimeout(function () {
+          if (!activeBatch || activeBatch.requestId !== requestId) return;
+          finishActiveBatch(
+            false,
+            "扩展后台未响应（" +
+              BRIDGE_ACK_MS / 1000 +
+              "s）。请确认已加载 1.0.7（含 background.js）并硬刷新。"
+          );
+        }, BRIDGE_ACK_MS);
+
+        // fire-and-forget; completion via chrome.tabs.sendMessage → onBackgroundMessage
+        sendToBackground({
+          type: "batch-download",
           requestId: requestId,
+          jobs: jobs.map(function (j) {
+            return { sessionId: j.sessionId, fileName: j.fileName };
+          }),
+          bearer: auth.bearer,
+          authPath: auth.authPath,
+          agentBase: agentBase(),
+          zipName: zipName,
+        }).catch(function (err) {
+          finishActiveBatch(false, "发送后台失败: " + (err && err.message ? err.message : err));
         });
-      } catch (err) {
-        finishActiveBatch(false, "发送桥接失败: " + (err && err.message ? err.message : err));
-      }
+      })().catch(function (err) {
+        finishActiveBatch(false, String(err && err.message ? err.message : err));
+      });
     });
   }
 
@@ -782,10 +897,38 @@
       installBridgeListener();
       postToBridge({ type: "ping", requestId: newMsgId() });
       postToBridge({ type: "request-auth" });
+      if (hasExtensionRuntime) {
+        try {
+          chrome.runtime.sendMessage({ source: BRIDGE_SOURCE, type: "ping-bg" }, function (resp) {
+            if (!chrome.runtime.lastError && resp && resp.ok) {
+              bgSeen = true;
+              try {
+                setStatus("扩展后台在线 v" + (resp.version || VERSION) + "（可绕过 CORS）");
+              } catch (e) {
+                /* ignore */
+              }
+            }
+          });
+        } catch (e) {
+          /* ignore */
+        }
+      }
       setTimeout(function () {
         if (!bridgeSeen) {
           try {
-            setStatus("警告：未检测到页面桥接。请装 1.0.6 扩展并硬刷新本页。", true);
+            setStatus("警告：未检测到页面桥接。请装 1.0.7 扩展并硬刷新。", true);
+          } catch (e) {
+            /* ignore */
+          }
+        } else if (hasExtensionRuntime && !bgSeen) {
+          try {
+            setStatus("警告：页面桥接在，但后台未响应。请重新加载 1.0.7 扩展。", true);
+          } catch (e) {
+            /* ignore */
+          }
+        } else if (!hasExtensionRuntime) {
+          try {
+            setStatus("当前非扩展环境：无法后台下载（会 CORS）。请用 Chrome 扩展 1.0.7。", true);
           } catch (e) {
             /* ignore */
           }
@@ -794,7 +937,7 @@
       tick();
       pollTimer = setInterval(tick, POLL_MS);
       try {
-        console.info("[a3-batch-qa] started v" + VERSION + " (CustomEvent bridge + timeouts)");
+        console.info("[a3-batch-qa] started v" + VERSION + " (background download)");
       } catch (e) {
         /* ignore */
       }

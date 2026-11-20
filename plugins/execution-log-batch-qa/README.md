@@ -4,11 +4,11 @@
 
 > 浏览器插件（userscript / Chrome MV3），**不改** A3 产品仓库。鉴权复用当前登录态与 AUTO Token，仓库内无任何密钥。
 
-**v1.0.6：** 修复批量后按钮一直灰、无 ZIP。根因：ISOLATED↔MAIN 仅靠 `postMessage` 不可靠 / 鉴权探活与单文件 `fetch` 无超时 → UI `busy` 永不清除。改为 **CustomEvent + postMessage**、桥接 2.5s 确认、鉴权 12s、单文件 20s、整批上限；失败必恢复按钮；部分成功也出 ZIP。
+**v1.0.7：** 修复 `Failed to fetch`（页面上下文跨域打 `agent.*` 被 CORS 拦截）。下载改走 **MV3 `background` service worker**（`host_permissions`，不受页面 CORS）；MAIN 只截获 Bearer；ZIP 在后台打包并用 `chrome.downloads` 保存。
 
-**v1.0.5：** 不再依赖 `/me/auto`；MAIN 截获 Agent Authorization（仍可能因桥接/超时卡住，已由 1.0.6 修）。
+**v1.0.6：** 桥接确认 + 超时恢复按钮（仍在页面 fetch，会撞 CORS，已由 1.0.7 修）。
 
-**v1.0.4：** 曾尝试 MAIN 桥接 + `/me/auto`（仍可能 401）。
+**v1.0.5：** 不再依赖 `/me/auto`；MAIN 截获 Agent Authorization。
 
 **v1.0.3：** ZIP 内文件名改为列表列 **用户_最近一轮.txt**（只读表头/单元格，不改表格 DOM）。
 
@@ -47,9 +47,9 @@ Host 映射与页面一致：
 | `a3-pre-lib.a3database.cn` | `https://pre-api.a3database.cn` | `https://agent.a3database.cn/scope` |
 | `a3-test-lib.a3database.cn` | `https://test-api.a3database.cn` | `https://agent-test.a3database.cn/scope` |
 
-鉴权优先级（均在 MAIN）：`document_start` 截获的 Agent Bearer → 登录 `localStorage.token` 直连下载探活 → 自动点击「下载问答」截获。**不把 `/me/auto` 当主路径。** 仓库不保存、不提交任何 token。
+鉴权（MAIN）：截获页面 Agent Bearer → 必要时点「下载问答」截获 → 登录 token 兜底。下载（background）：带 Bearer GET Agent，打 ZIP。**不把 `/me/auto` 当主路径。**
 
-Chrome：**MAIN** `page-bridge.js`（`document_start`，下载引擎）+ **ISOLATED** `content.js`（浮动面板 UI）。
+Chrome：**MAIN** `page-bridge.js`（鉴权）+ **ISOLATED** `content.js`（UI）+ **`background.js`**（下载/ZIP）。
 
 ## 安装
 
