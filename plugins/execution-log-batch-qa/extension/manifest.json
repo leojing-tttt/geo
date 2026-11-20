@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "A3 执行记录 · 批量下载问答",
-  "version": "1.0.7",
-  "description": "批量下载「下载问答」；background 绕过 CORS；条目名=用户_最近一轮.txt",
+  "version": "1.0.8",
+  "description": "批量下载「下载问答」；background Port 绕过 CORS；条目名=用户_最近一轮.txt",
   "icons": {},
   "action": {
     "default_title": "A3 批量下载问答"

@@ -1,8 +1,8 @@
 /**
- * MAIN-world auth bridge (v1.0.7).
+ * MAIN-world auth bridge (v1.0.8).
  * document_start: observe page Agent Authorization (same Bearer as 「下载问答」).
  * Does NOT download Agent files here (page→agent hits CORS → Failed to fetch).
- * ISOLATED UI forwards bearer to MV3 background for host_permissions fetch.
+ * ISOLATED UI forwards bearer to MV3 background Port for host_permissions fetch.
  */
 (function () {
   "use strict";
@@ -12,7 +12,7 @@
 
     var SOURCE = "a3-batch-qa";
     var EVENT = "__a3_batch_qa";
-    var VERSION = "1.0.7";
+    var VERSION = "1.0.8";
     var AUTH_MS = 12000;
 
     var agentBearer = "";
@@ -292,7 +292,7 @@
           type: "batch-done",
           requestId: d.requestId,
           ok: false,
-          text: "v1.0.7：下载已改走扩展 background，请确认已加载带 background 的扩展包并硬刷新",
+          text: "v1.0.8：下载已改走扩展 background Port，请确认已加载带 background 的扩展包并硬刷新",
         });
         return;
       }

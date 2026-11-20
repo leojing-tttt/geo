@@ -1,11 +1,11 @@
 /**
- * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.7+).
+ * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.8+).
  *
  * Safety rules (do NOT break page load):
  * - UI in ISOLATED: never MutationObserver / history rewrite / Ant Table cell injection
  * - Soft-poll for tr[data-row-key]; UI on document.body only
- * - MAIN bridge only captures Bearer; downloads via MV3 background (no page CORS)
- * - ISOLATED↔MAIN via CustomEvent; ISOLATED→background via chrome.runtime
+ * - MAIN bridge only captures Bearer; NEVER page-fetch Agent download URLs
+ * - Downloads via MV3 background Port (keeps SW alive; zip stays in background)
  *
  * API:
  *   GET {agentBase}/admin/conversations/{sessionId}/download?variant=brief
@@ -27,7 +27,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  var VERSION = "1.0.7";
+  var VERSION = "1.0.8";
   var VARIANT = "brief";
   var POLL_MS = 1500;
   var BRIDGE_ACK_MS = 2500;
@@ -36,7 +36,10 @@
   var BATCH_OVERALL_PER_MS = 28000;
   var BATCH_OVERALL_CAP_MS = 12 * 60 * 1000;
   var hasExtensionRuntime =
-    typeof chrome !== "undefined" && chrome.runtime && typeof chrome.runtime.sendMessage === "function";
+    typeof chrome !== "undefined" &&
+    chrome.runtime &&
+    (typeof chrome.runtime.sendMessage === "function" || typeof chrome.runtime.connect === "function");
+  var activePort = null;
   var HOST_AGENT = {
     "a3-lib.a3database.cn": "https://agent.a3database.cn",
     "a3-pre-lib.a3database.cn": "https://agent.a3database.cn",
@@ -465,6 +468,76 @@
     });
   }
 
+  /**
+   * Prefer Port so SW stays alive; never ship file bytes over messaging (zip in background).
+   * Completion is via port messages → onBackgroundMessage (not sendResponse).
+   */
+  function startBackgroundBatch(payload) {
+    return new Promise(function (resolve, reject) {
+      if (!hasExtensionRuntime) {
+        reject(new Error("无 chrome.runtime"));
+        return;
+      }
+      try {
+        if (typeof chrome.runtime.connect !== "function") {
+          // very old fallback
+          sendToBackground(payload).then(resolve).catch(reject);
+          return;
+        }
+        var port = chrome.runtime.connect({ name: "a3-batch-qa" });
+        activePort = port;
+        var gotAck = false;
+        port.onMessage.addListener(function (msg) {
+          try {
+            if (!msg) return;
+            if (!msg.source) msg.source = "a3-batch-qa-bg";
+            if (msg.type === "batch-ack") gotAck = true;
+            onBackgroundMessage(msg);
+            if (msg.type === "batch-done" && (!payload.requestId || msg.requestId === payload.requestId)) {
+              try {
+                port.disconnect();
+              } catch (e) {
+                /* ignore */
+              }
+              if (activePort === port) activePort = null;
+              resolve(msg);
+            }
+          } catch (e) {
+            /* ignore */
+          }
+        });
+        port.onDisconnect.addListener(function () {
+          if (activePort === port) activePort = null;
+          var errMsg = "";
+          try {
+            errMsg = (chrome.runtime.lastError && chrome.runtime.lastError.message) || "";
+          } catch (e) {
+            /* ignore */
+          }
+          // If batch already finished, ignore disconnect
+          if (!activeBatch || activeBatch.requestId !== payload.requestId) return;
+          // If we never got ack, fail fast; if mid-batch, report SW drop
+          if (!gotAck) {
+            finishActiveBatch(
+              false,
+              "扩展后台 Port 未连通" + (errMsg ? "：" + errMsg : "") + "。请重新加载 1.0.8 扩展。"
+            );
+            reject(new Error(errMsg || "port disconnected before ack"));
+          } else {
+            finishActiveBatch(
+              false,
+              "后台连接中断（service worker 可能被回收）。已恢复按钮，请重试。"
+            );
+            reject(new Error(errMsg || "port disconnected mid-batch"));
+          }
+        });
+        port.postMessage(Object.assign({ source: BRIDGE_SOURCE }, payload));
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
   function buildEntryFilename(user, recent, sessionId, withSessionSuffix) {
     var u = sanitizeFilenamePart(user || "unknown", 60);
     var r = sanitizeFilenamePart(recent || "unknown", 60);
@@ -737,7 +810,7 @@
         });
       setTimeout(function () {
         if (!bridgeSeen) {
-          setStatus("桥接无响应：请加载 1.0.7 扩展并硬刷新", true);
+          setStatus("桥接无响应：请加载 1.0.8 扩展并硬刷新", true);
         }
       }, BRIDGE_ACK_MS);
     });
@@ -775,7 +848,7 @@
     }
     if (!hasExtensionRuntime) {
       clearBusy(
-        "当前环境无扩展 background（CORS 无法从页面直连 Agent）。请安装 Chrome 扩展 1.0.7。",
+        "当前环境无扩展 background（CORS 无法从页面直连 Agent）。请安装 Chrome 扩展 1.0.8。",
         true
       );
       return Promise.resolve();
@@ -803,6 +876,11 @@
 
       ab.doneTimer = setTimeout(function () {
         if (!activeBatch || activeBatch.requestId !== requestId) return;
+        try {
+          if (activePort) activePort.disconnect();
+        } catch (e) {
+          /* ignore */
+        }
         finishActiveBatch(
           false,
           "批量超时（" + Math.round(overallMs / 1000) + "s）。按钮已恢复，可重试。"
@@ -812,7 +890,10 @@
       (async function () {
         setStatus("1/3 截获页面 Agent Bearer…");
         var auth = await requestBearer(jobs[0].sessionId);
-        setStatus("2/3 鉴权就绪（" + (auth.authPath || "captured") + "），交由扩展后台下载…");
+        if (!auth || !auth.bearer) {
+          throw new Error("鉴权失败：Bearer 为空（不会发起下载，避免误报 Failed to fetch）");
+        }
+        setStatus("2/3 鉴权就绪（" + (auth.authPath || "captured") + "），Port → 扩展后台…");
 
         ab.ackTimer = setTimeout(function () {
           if (!activeBatch || activeBatch.requestId !== requestId) return;
@@ -820,12 +901,12 @@
             false,
             "扩展后台未响应（" +
               BRIDGE_ACK_MS / 1000 +
-              "s）。请确认已加载 1.0.7（含 background.js）并硬刷新。"
+              "s）。请确认已加载 1.0.8（含 background.js）并硬刷新。"
           );
         }, BRIDGE_ACK_MS);
 
-        // fire-and-forget; completion via chrome.tabs.sendMessage → onBackgroundMessage
-        sendToBackground({
+        // Port keeps SW alive; zip/files never cross sendMessage size limits
+        startBackgroundBatch({
           type: "batch-download",
           requestId: requestId,
           jobs: jobs.map(function (j) {
@@ -835,8 +916,8 @@
           authPath: auth.authPath,
           agentBase: agentBase(),
           zipName: zipName,
-        }).catch(function (err) {
-          finishActiveBatch(false, "发送后台失败: " + (err && err.message ? err.message : err));
+        }).catch(function () {
+          /* finishActiveBatch already called on disconnect / errors */
         });
       })().catch(function (err) {
         finishActiveBatch(false, String(err && err.message ? err.message : err));
@@ -916,19 +997,19 @@
       setTimeout(function () {
         if (!bridgeSeen) {
           try {
-            setStatus("警告：未检测到页面桥接。请装 1.0.7 扩展并硬刷新。", true);
+            setStatus("警告：未检测到页面桥接。请装 1.0.8 扩展并硬刷新。", true);
           } catch (e) {
             /* ignore */
           }
         } else if (hasExtensionRuntime && !bgSeen) {
           try {
-            setStatus("警告：页面桥接在，但后台未响应。请重新加载 1.0.7 扩展。", true);
+            setStatus("警告：页面桥接在，但后台未响应。请重新加载 1.0.8 扩展。", true);
           } catch (e) {
             /* ignore */
           }
         } else if (!hasExtensionRuntime) {
           try {
-            setStatus("当前非扩展环境：无法后台下载（会 CORS）。请用 Chrome 扩展 1.0.7。", true);
+            setStatus("当前非扩展环境：无法后台下载（会 CORS）。请用 Chrome 扩展 1.0.8。", true);
           } catch (e) {
             /* ignore */
           }

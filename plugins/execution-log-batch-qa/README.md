@@ -4,11 +4,11 @@
 
 > 浏览器插件（userscript / Chrome MV3），**不改** A3 产品仓库。鉴权复用当前登录态与 AUTO Token，仓库内无任何密钥。
 
-**v1.0.7：** 修复 `Failed to fetch`（页面上下文跨域打 `agent.*` 被 CORS 拦截）。下载改走 **MV3 `background` service worker**（`host_permissions`，不受页面 CORS）；MAIN 只截获 Bearer；ZIP 在后台打包并用 `chrome.downloads` 保存。
+**v1.0.8：** 自回归加固：批量改走 **`chrome.runtime.connect` Port**（防止 SW 中途休眠）；空 Bearer / HTTP 401 明确报错（不再误标 Failed to fetch）；ZIP 仅在 background；新增 `test/regress-background-path.mjs` mock 证明后台 fetch。
 
-**v1.0.6：** 桥接确认 + 超时恢复按钮（仍在页面 fetch，会撞 CORS，已由 1.0.7 修）。
+**v1.0.7：** 下载改走 background 绕过页面 CORS（仍用 sendMessage，长任务可能断连，已由 1.0.8 Port 加固）。
 
-**v1.0.5：** 不再依赖 `/me/auto`；MAIN 截获 Agent Authorization。
+**v1.0.6：** 桥接确认 + 超时恢复按钮。
 
 **v1.0.3：** ZIP 内文件名改为列表列 **用户_最近一轮.txt**（只读表头/单元格，不改表格 DOM）。
 
