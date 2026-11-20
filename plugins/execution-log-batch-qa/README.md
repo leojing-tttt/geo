@@ -4,9 +4,11 @@
 
 > 浏览器插件（userscript / Chrome MV3），**不改** A3 产品仓库。鉴权复用当前登录态与 AUTO Token，仓库内无任何密钥。
 
+**v1.0.4：** 修复 ISOLATED 扩展读不到页面鉴权 → `/me/auto` 401。增加 **MAIN-world `page-bridge.js`**：读取 `localStorage.token`、旁路捕获 Agent `Authorization`、页面上下文换取 AUTO Token；失败时提示先点一次「下载问答」。
+
 **v1.0.3：** ZIP 内文件名改为列表列 **用户_最近一轮.txt**（只读表头/单元格，不改表格 DOM）。
 
-**v1.0.2 安全模式：** 不劫持 `fetch` / `history`；不用 MutationObserver；**不往 Ant Table 插单元格**（避免骨架屏卡死）。右下角浮动面板 + 轮询读取 `tr[data-row-key]`。
+**v1.0.2 安全模式：** UI 仍在 ISOLATED；不改 Ant Table DOM；不用 MutationObserver / history 劫持。右下角浮动面板 + 轮询读取 `tr[data-row-key]`。MAIN 桥接仅做鉴权观察（轻量 fetch observe，不改响应）。
 
 若页面只剩骨架屏：先在 `chrome://extensions` **禁用/移除本扩展** 并硬刷新即可恢复。
 
@@ -41,9 +43,9 @@ Host 映射与页面一致：
 | `a3-pre-lib.a3database.cn` | `https://pre-api.a3database.cn` | `https://agent.a3database.cn/scope` |
 | `a3-test-lib.a3database.cn` | `https://test-api.a3database.cn` | `https://agent-test.a3database.cn/scope` |
 
-插件会读取页面登录态 `localStorage.token`，请求 `/api/v1/sys/user-tokens/me/auto` 换取 AUTO Token（与页面「我的令牌」同源逻辑）。不劫持页面 `fetch`。仓库不保存、不提交任何 token。
+鉴权优先级：页面真实 Agent `Authorization`（点过「下载问答」或列表请求）→ MAIN 桥接读取的 `localStorage.token` 换 `/me/auto` → 登录 token 直打 Agent（兜底）。仓库不保存、不提交任何 token。
 
-Chrome 扩展使用默认 **ISOLATED** content script（不再 `world: MAIN`）。
+Chrome：**ISOLATED** `content.js`（UI）+ **MAIN** `page-bridge.js`（鉴权桥）。
 
 ## 安装
 
@@ -71,7 +73,8 @@ plugins/execution-log-batch-qa/
 ├── shared/batch-qa-core.js          # 共用逻辑（ZIP STORE、鉴权、UI）
 ├── userscript/a3-execution-log-batch-qa.user.js
 └── extension/
-    ├── manifest.json                # MV3（ISOLATED，默认）
+    ├── manifest.json                # MV3：MAIN bridge + ISOLATED UI
+    ├── page-bridge.js
     └── content.js
 ```
 

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         A3 执行记录 · 批量下载问答
 // @namespace    https://github.com/leojing-tttt/geo
-// @version      1.0.3
-// @description  批量下载「下载问答」为 ZIP；条目名=用户_最近一轮.txt（安全模式）
+// @version      1.0.4
+// @description  批量下载「下载问答」；条目名=用户_最近一轮.txt；页面鉴权桥接
 // @author       geo plugin
 // @match        https://a3-lib.a3database.cn/*
 // @match        https://a3-pre-lib.a3database.cn/*
@@ -20,7 +20,185 @@
   "use strict";
   try {
 /**
- * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.3+).
+ * MAIN-world bridge (v1.0.4+).
+ * Runs in the page JS context so it can:
+ *  - read page localStorage.token (and common keys)
+ *  - observe Authorization on real Agent download/fetch calls
+ *  - optionally refresh AUTO token the same way the page does
+ * Posts results to the ISOLATED content script via window.postMessage.
+ *
+ * Keep this tiny and fail-soft — never throw into the page.
+ */
+(function () {
+  "use strict";
+  try {
+    if (window.__a3BatchQaBridgeInstalled) return;
+    window.__a3BatchQaBridgeInstalled = true;
+
+    var SOURCE = "a3-batch-qa";
+    var agentBearer = "";
+    var HOST_API = {
+      "a3-lib.a3database.cn": "https://api.a3database.cn",
+      "a3-pre-lib.a3database.cn": "https://pre-api.a3database.cn",
+      "a3-test-lib.a3database.cn": "https://test-api.a3database.cn",
+    };
+
+    function apiBase() {
+      return (HOST_API[location.hostname] || "https://api.a3database.cn").replace(/\/+$/, "");
+    }
+
+    function stripBearer(v) {
+      if (!v) return "";
+      var m = String(v).match(/^\s*Bearer\s+(.+)\s*$/i);
+      return (m ? m[1] : v).trim();
+    }
+
+    function readLoginToken() {
+      try {
+        var keys = ["token", "access_token", "accessToken", "authToken", "Authorization"];
+        for (var i = 0; i < keys.length; i++) {
+          var v = localStorage.getItem(keys[i]);
+          if (v && String(v).trim()) return stripBearer(v);
+        }
+      } catch (e) {
+        /* ignore */
+      }
+      return "";
+    }
+
+    function postAuth(extra) {
+      try {
+        var payload = {
+          source: SOURCE,
+          type: "auth",
+          loginToken: readLoginToken(),
+          agentBearer: agentBearer || "",
+        };
+        if (extra) {
+          for (var k in extra) if (Object.prototype.hasOwnProperty.call(extra, k)) payload[k] = extra[k];
+        }
+        window.postMessage(payload, location.origin);
+      } catch (e) {
+        /* ignore */
+      }
+    }
+
+    function rememberAgentBearer(v) {
+      var t = stripBearer(v);
+      if (!t) return;
+      agentBearer = t;
+      postAuth();
+    }
+
+    function headerAuth(headers) {
+      try {
+        if (!headers) return "";
+        if (typeof headers.get === "function") {
+          return headers.get("Authorization") || headers.get("authorization") || "";
+        }
+        return headers.Authorization || headers.authorization || "";
+      } catch (e) {
+        return "";
+      }
+    }
+
+    // Observe only — must not break page fetch (skeleton bug class)
+    try {
+      var origFetch = window.fetch;
+      if (typeof origFetch === "function" && !window.__a3BatchQaFetchObserved) {
+        window.__a3BatchQaFetchObserved = true;
+        window.fetch = function (input, init) {
+          try {
+            var url = typeof input === "string" ? input : input && input.url;
+            if (url && /agent(-test)?\.a3database\.cn/i.test(String(url))) {
+              var auth = headerAuth((init && init.headers) || (input && input.headers));
+              if (auth) rememberAgentBearer(auth);
+            }
+          } catch (e) {
+            /* ignore */
+          }
+          return origFetch.apply(this, arguments);
+        };
+      }
+    } catch (e) {
+      /* ignore */
+    }
+
+    async function refreshAutoToken() {
+      var login = readLoginToken();
+      if (!login) {
+        postAuth({ autoError: "no-login-token" });
+        return;
+      }
+      try {
+        var res = await fetch(apiBase() + "/api/v1/sys/user-tokens/me/auto", {
+          method: "GET",
+          credentials: "include",
+          headers: {
+            Accept: "application/json",
+            Authorization: "Bearer " + login,
+            "X-Requested-With": "XMLHttpRequest",
+          },
+        });
+        var json = null;
+        try {
+          json = await res.json();
+        } catch (e) {
+          json = null;
+        }
+        var token =
+          json && json.data && json.data.token
+            ? String(json.data.token)
+            : json && json.token
+              ? String(json.token)
+              : "";
+        if (token) {
+          agentBearer = token;
+          postAuth({ autoOk: true });
+        } else {
+          postAuth({
+            autoError: "auto-401",
+            autoHttp: res.status,
+            autoCode: json && json.code,
+          });
+        }
+      } catch (err) {
+        postAuth({ autoError: String(err && err.message ? err.message : err) });
+      }
+    }
+
+    window.addEventListener("message", function (ev) {
+      try {
+        if (ev.source !== window) return;
+        var d = ev.data;
+        if (!d || d.source !== SOURCE) return;
+        if (d.type === "request-auth") {
+          postAuth();
+          refreshAutoToken();
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    });
+
+    // Initial publish + delayed refresh (page may set token just after idle)
+    postAuth();
+    setTimeout(function () {
+      postAuth();
+      refreshAutoToken();
+    }, 800);
+    setTimeout(postAuth, 2500);
+  } catch (err) {
+    try {
+      console.error("[a3-batch-qa-bridge]", err);
+    } catch (e) {
+      /* ignore */
+    }
+  }
+})();
+
+/**
+ * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.4+).
  *
  * Safety rules (do NOT break page load):
  * - Never monkeypatch window.fetch / history.pushState / replaceState
@@ -50,7 +228,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  var VERSION = "1.0.3";
+  var VERSION = "1.0.4";
   var VARIANT = "brief";
   var POLL_MS = 1500;
   var HOST_AGENT = {
@@ -244,8 +422,13 @@
     return concatBytes(localParts.concat([centralDir, end]));
   }
 
-  /* ---- auth (no fetch monkeypatch) ---- */
+  /* ---- auth (MAIN-world bridge + fallbacks; no aggressive page hooks here) ---- */
+  var BRIDGE_SOURCE = "a3-batch-qa";
   var capturedBearer = "";
+  var pageLoginToken = "";
+  var pageAgentBearer = "";
+  var bridgeReady = false;
+  var lastAuthHint = "";
 
   function rememberBearer(value) {
     if (!value) return;
@@ -253,12 +436,83 @@
     capturedBearer = (m ? m[1] : value).trim();
   }
 
-  function readLoginToken() {
+  function readLoginTokenLocal() {
     try {
-      return (root.localStorage && root.localStorage.getItem("token")) || "";
+      var ls = root.localStorage;
+      if (!ls) return "";
+      var keys = ["token", "access_token", "accessToken", "authToken"];
+      for (var i = 0; i < keys.length; i++) {
+        var v = ls.getItem(keys[i]);
+        if (v && String(v).trim()) {
+          var m = String(v).match(/^\s*Bearer\s+(.+)\s*$/i);
+          return (m ? m[1] : v).trim();
+        }
+      }
     } catch (e) {
-      return "";
+      /* ignore — common in ISOLATED / blocked storage */
     }
+    return "";
+  }
+
+  function authHelpError(detail) {
+    return new Error(
+      (detail ? detail + "。" : "") +
+        "请先点击表格中任意一行的「下载问答」一次以预热令牌，或打开「我的令牌」确认 AUTO Token 可用后再试批量下载。"
+    );
+  }
+
+  function onBridgeAuth(data) {
+    bridgeReady = true;
+    if (data.loginToken) pageLoginToken = String(data.loginToken);
+    if (data.agentBearer) {
+      pageAgentBearer = String(data.agentBearer);
+      rememberBearer(pageAgentBearer);
+    }
+    if (data.autoError) lastAuthHint = String(data.autoError);
+    if (data.autoOk) lastAuthHint = "";
+  }
+
+  function installBridgeListener() {
+    if (root.__a3BatchQaBridgeListening) return;
+    root.__a3BatchQaBridgeListening = true;
+    try {
+      root.addEventListener("message", function (ev) {
+        try {
+          var d = ev.data;
+          if (!d || d.source !== BRIDGE_SOURCE || d.type !== "auth") return;
+          onBridgeAuth(d);
+        } catch (e) {
+          /* ignore */
+        }
+      });
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  function requestBridgeAuth() {
+    try {
+      root.postMessage({ source: BRIDGE_SOURCE, type: "request-auth" }, location.origin);
+    } catch (e) {
+      try {
+        root.postMessage({ source: BRIDGE_SOURCE, type: "request-auth" }, "*");
+      } catch (e2) {
+        /* ignore */
+      }
+    }
+  }
+
+  function waitForBridgeAuth(ms) {
+    requestBridgeAuth();
+    return new Promise(function (resolve) {
+      var start = Date.now();
+      var t = setInterval(function () {
+        if (pageAgentBearer || pageLoginToken || Date.now() - start > (ms || 2500)) {
+          clearInterval(t);
+          resolve();
+        }
+      }, 100);
+    });
   }
 
   function extractAutoToken(json) {
@@ -268,8 +522,7 @@
     return "";
   }
 
-  async function fetchAutoToken() {
-    var loginToken = readLoginToken();
+  async function fetchAutoTokenWith(loginToken) {
     var headers = {
       Accept: "application/json",
       "X-Requested-With": "XMLHttpRequest",
@@ -286,35 +539,69 @@
     } catch (e) {
       json = null;
     }
+    var token = extractAutoToken(json);
     var bizCode = json && json.code;
-    if (!res.ok || (bizCode != null && bizCode !== 200 && !extractAutoToken(json))) {
-      throw new Error(
+    if (!res.ok || (bizCode != null && bizCode !== 200 && !token) || !token) {
+      var err = new Error(
         "获取 AUTO Token 失败（HTTP " +
           res.status +
           (bizCode != null ? ", code=" + bizCode : "") +
-          "），请确认已登录且「我的令牌」可用"
+          "）"
       );
+      err.autoFailed = true;
+      throw err;
     }
-    var token = extractAutoToken(json);
-    if (!token) throw new Error("未能获取 AUTO Token，请前往「我的令牌」更新");
     rememberBearer(token);
+    pageAgentBearer = token;
     return token;
   }
 
   async function ensureBearer() {
     if (capturedBearer) return capturedBearer;
-    return fetchAutoToken();
+    if (pageAgentBearer) {
+      rememberBearer(pageAgentBearer);
+      return pageAgentBearer;
+    }
+
+    await waitForBridgeAuth(2800);
+
+    if (pageAgentBearer) {
+      rememberBearer(pageAgentBearer);
+      return pageAgentBearer;
+    }
+
+    var login = pageLoginToken || readLoginTokenLocal();
+
+    // Fallback: /me/auto (same as page gate) — may 401 if login token missing
+    if (login) {
+      try {
+        return await fetchAutoTokenWith(login);
+      } catch (e) {
+        lastAuthHint = String(e && e.message ? e.message : e);
+      }
+    }
+
+    // Last resort: try login token directly as Agent Bearer
+    if (login) {
+      rememberBearer(login);
+      return login;
+    }
+
+    throw authHelpError(
+      lastAuthHint
+        ? lastAuthHint
+        : "鉴权失败（未读到页面登录 token / Agent Authorization）"
+    );
   }
 
-  async function downloadBrief(sessionId) {
-    var token = await ensureBearer();
+  async function downloadWithToken(sessionId, token) {
     var url =
       agentBase() +
       "/admin/conversations/" +
       encodeURIComponent(sessionId) +
       "/download?variant=" +
       encodeURIComponent(VARIANT);
-    var res = await fetch(url, {
+    return fetch(url, {
       method: "GET",
       credentials: "include",
       headers: {
@@ -323,18 +610,25 @@
         "X-Requested-With": "XMLHttpRequest",
       },
     });
+  }
+
+  async function downloadBrief(sessionId) {
+    var token = await ensureBearer();
+    var res = await downloadWithToken(sessionId, token);
     if (res.status === 401) {
       capturedBearer = "";
-      token = await fetchAutoToken();
-      res = await fetch(url, {
-        method: "GET",
-        credentials: "include",
-        headers: {
-          Accept: "*/*",
-          Authorization: "Bearer " + token,
-          "X-Requested-With": "XMLHttpRequest",
-        },
-      });
+      pageAgentBearer = "";
+      // Re-ask bridge (user may have just clicked 下载问答)
+      await waitForBridgeAuth(1500);
+      try {
+        token = await ensureBearer();
+      } catch (e) {
+        throw authHelpError(e && e.message ? e.message : "");
+      }
+      res = await downloadWithToken(sessionId, token);
+    }
+    if (res.status === 401) {
+      throw authHelpError("Agent 下载返回 401（Authorization 无效）");
     }
     if (!res.ok) {
       var detail = "";
@@ -612,10 +906,11 @@
       '  <div class="a3-batch-qa-actions">',
       '    <button type="button" class="secondary" id="a3-batch-qa-select-page">全选本页</button>',
       '    <button type="button" class="secondary" id="a3-batch-qa-clear">清空</button>',
+      '    <button type="button" class="secondary" id="a3-batch-qa-refresh-auth">同步鉴权</button>',
       '    <button type="button" id="a3-batch-qa-download" disabled>批量下载问答</button>',
       "  </div>",
       '  <div id="a3-batch-qa-list"></div>',
-      '  <div id="a3-batch-qa-status">勾选后打包 ZIP；文件名=用户_最近一轮.txt</div>',
+      '  <div id="a3-batch-qa-status">文件名=用户_最近一轮.txt；若鉴权失败请先点一次「下载问答」</div>',
       "</div>",
       '<button type="button" id="a3-batch-qa-toggle">收起批量下载</button>',
     ].join("");
@@ -635,6 +930,22 @@
       selected = Object.create(null);
       tick();
       setStatus("已清空选择");
+    });
+    document.getElementById("a3-batch-qa-refresh-auth").addEventListener("click", function () {
+      setStatus("正在向页面同步鉴权…");
+      waitForBridgeAuth(3000)
+        .then(function () {
+          if (pageAgentBearer || capturedBearer) {
+            setStatus("已同步 Agent Token，可批量下载");
+          } else if (pageLoginToken || readLoginTokenLocal()) {
+            setStatus("已读到登录 token；批量时将尝试换取 AUTO Token");
+          } else {
+            setStatus("未读到令牌：请先点一次表格「下载问答」或打开「我的令牌」", true);
+          }
+        })
+        .catch(function (err) {
+          setStatus(String(err && err.message ? err.message : err), true);
+        });
     });
     document.getElementById("a3-batch-qa-download").addEventListener("click", function () {
       runBatch().catch(function (err) {
@@ -751,11 +1062,16 @@
     try {
       if (started) return;
       started = true;
-      // Soft polling only — no history rewrite, no MutationObserver, no fetch patch
+      // Soft polling only — no history rewrite, no MutationObserver
+      // Auth: listen for MAIN-world bridge (extension) / or local token (userscript)
+      installBridgeListener();
+      requestBridgeAuth();
       tick();
       pollTimer = setInterval(tick, POLL_MS);
+      setTimeout(requestBridgeAuth, 1000);
+      setTimeout(requestBridgeAuth, 3000);
       try {
-        console.info("[a3-batch-qa] started v" + VERSION + " (safe mode)");
+        console.info("[a3-batch-qa] started v" + VERSION + " (safe mode + auth bridge)");
       } catch (e) {
         /* ignore */
       }

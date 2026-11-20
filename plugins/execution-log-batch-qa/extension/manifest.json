@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "A3 执行记录 · 批量下载问答",
-  "version": "1.0.3",
-  "description": "在 Agent 中心执行记录页批量下载「下载问答」并打包 ZIP（不改动页面表格 DOM）",
+  "version": "1.0.4",
+  "description": "批量下载「下载问答」为 ZIP；MAIN 桥接读取页面鉴权，不改表格 DOM",
   "icons": {},
   "action": {
     "default_title": "A3 批量下载问答"
@@ -18,6 +18,16 @@
     "https://agent-test.a3database.cn/*"
   ],
   "content_scripts": [
+    {
+      "matches": [
+        "https://a3-lib.a3database.cn/*",
+        "https://a3-pre-lib.a3database.cn/*",
+        "https://a3-test-lib.a3database.cn/*"
+      ],
+      "js": ["page-bridge.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    },
     {
       "matches": [
         "https://a3-lib.a3database.cn/*",
