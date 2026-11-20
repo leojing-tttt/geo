@@ -4,11 +4,11 @@
 
 > 浏览器插件（userscript / Chrome MV3），**不改** A3 产品仓库。鉴权复用当前登录态与 AUTO Token，仓库内无任何密钥。
 
-**v1.0.8：** 自回归加固：批量改走 **`chrome.runtime.connect` Port**（防止 SW 中途休眠）；空 Bearer / HTTP 401 明确报错（不再误标 Failed to fetch）；ZIP 仅在 background；新增 `test/regress-background-path.mjs` mock 证明后台 fetch。
+**v1.0.9：** 页面侧 **ZERO `fetch(`**（page-bridge / content）；Bearer 由 background **`webRequest`** 截获；批量前强制 `ping-bg`，失败只报「扩展后台未加载，请重新加载扩展」；用户可见错误 **禁止** 原样 `Failed to fetch`。
 
-**v1.0.7：** 下载改走 background 绕过页面 CORS（仍用 sendMessage，长任务可能断连，已由 1.0.8 Port 加固）。
+**v1.0.8：** Port 保活 SW + mock regress（仍可能把网络 TypeError 原文透出，已由 1.0.9 封死）。
 
-**v1.0.6：** 桥接确认 + 超时恢复按钮。
+**v1.0.7：** 下载改走 background 绕过页面 CORS。
 
 **v1.0.3：** ZIP 内文件名改为列表列 **用户_最近一轮.txt**（只读表头/单元格，不改表格 DOM）。
 

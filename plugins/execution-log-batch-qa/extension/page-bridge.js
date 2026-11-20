@@ -1,8 +1,9 @@
 /**
- * MAIN-world auth bridge (v1.0.8).
- * document_start: observe page Agent Authorization (same Bearer as 「下载问答」).
- * Does NOT download Agent files here (page→agent hits CORS → Failed to fetch).
- * ISOLATED UI forwards bearer to MV3 background Port for host_permissions fetch.
+ * MAIN-world auth bridge (v1.0.9).
+ * No page network API wrappers for Agent downloads. Only:
+ *  - soft-observe XHR Authorization (alova may use XHR in some builds)
+ *  - optional DOM click on 「下载问答」so background webRequest can capture Bearer
+ * Downloads are exclusively MV3 background (host_permissions).
  */
 (function () {
   "use strict";
@@ -12,12 +13,11 @@
 
     var SOURCE = "a3-batch-qa";
     var EVENT = "__a3_batch_qa";
-    var VERSION = "1.0.8";
+    var VERSION = "1.0.9";
     var AUTH_MS = 12000;
 
     var agentBearer = "";
     var authPath = "";
-    var suppressOnce = false;
     var handledIds = Object.create(null);
     var authBusy = false;
 
@@ -35,30 +35,8 @@
       return true;
     }
 
-    function headerAuth(headers) {
-      try {
-        if (!headers) return "";
-        if (typeof headers.get === "function") {
-          return headers.get("Authorization") || headers.get("authorization") || "";
-        }
-        if (Array.isArray(headers)) {
-          for (var i = 0; i < headers.length; i++) {
-            if (String(headers[i][0]).toLowerCase() === "authorization") return headers[i][1];
-          }
-          return "";
-        }
-        return headers.Authorization || headers.authorization || "";
-      } catch (e) {
-        return "";
-      }
-    }
-
     function isAgentUrl(url) {
       return url && /agent(-test)?\.a3database\.cn/i.test(String(url));
-    }
-
-    function isAgentDownloadUrl(url) {
-      return isAgentUrl(url) && /\/admin\/conversations\/[^/]+\/download/i.test(String(url));
     }
 
     function newMsgId() {
@@ -115,27 +93,7 @@
       });
     }
 
-    /* observe only — never replace Agent responses except warm-suppress */
-    var origFetch = window.fetch;
-    if (typeof origFetch === "function") {
-      window.fetch = function (input, init) {
-        try {
-          var url = typeof input === "string" ? input : input && input.url;
-          if (isAgentUrl(url)) {
-            var auth = headerAuth((init && init.headers) || (input && input.headers));
-            if (auth) rememberBearer(auth, "page-fetch-observe");
-            if (suppressOnce && isAgentDownloadUrl(url) && agentBearer) {
-              suppressOnce = false;
-              return Promise.reject(new Error("a3-batch-qa-auth-warm"));
-            }
-          }
-        } catch (e) {
-          /* ignore */
-        }
-        return origFetch.apply(this, arguments);
-      };
-    }
-
+    // XHR observe only — do not wrap window networking globals in this file
     try {
       var XO = XMLHttpRequest.prototype.open;
       var XS = XMLHttpRequest.prototype.setRequestHeader;
@@ -194,6 +152,7 @@
       return null;
     }
 
+    /** Click page control so *page* issues Agent request; background webRequest captures Bearer. */
     function warmCaptureByClick(preferredSessionId) {
       return new Promise(function (resolve) {
         if (agentBearer) {
@@ -205,20 +164,18 @@
           resolve(false);
           return;
         }
-        suppressOnce = true;
         var started = Date.now();
         try {
           btn.click();
         } catch (e) {
-          suppressOnce = false;
           resolve(false);
           return;
         }
+        // Wait for XHR observe OR for background to have captured (content will poll bg)
         var timer = setInterval(function () {
           if (agentBearer || Date.now() - started > 5000) {
             clearInterval(timer);
-            suppressOnce = false;
-            if (agentBearer) authPath = authPath || "warm-click-capture";
+            if (agentBearer) authPath = authPath || "warm-click-dom";
             resolve(!!agentBearer);
           }
         }, 50);
@@ -229,31 +186,29 @@
       return withTimeout(
         (async function () {
           if (agentBearer) return agentBearer;
-          status("鉴权中: 等待页面 Agent Bearer…");
+          status("鉴权中: 等待已截获的 Bearer（XHR / 扩展 webRequest）…");
           await new Promise(function (r) {
-            setTimeout(r, 80);
+            setTimeout(r, 120);
           });
           if (agentBearer) return agentBearer;
 
-          // Capture the real Agent Bearer from page 「下载问答」 (do not page-fetch Agent — CORS)
-          status("鉴权中: 触发「下载问答」截获 Authorization…");
+          status("鉴权中: 点击页面「下载问答」以触发真实请求（本桥不下载）…");
           if (await warmCaptureByClick(preferredSessionId)) return agentBearer;
 
           await new Promise(function (r) {
-            setTimeout(r, 400);
+            setTimeout(r, 600);
           });
           if (agentBearer) return agentBearer;
 
-          // Last resort: login token as candidate (background validates; may 401)
           var login = readLoginToken();
           if (login) {
             rememberBearer(login, "login-token-candidate");
-            status("未截获 Agent Bearer，尝试登录 token 交后台验证…");
+            status("未截获 Agent Bearer，交登录 token 给后台验证…");
             return agentBearer;
           }
 
           throw new Error(
-            "鉴权失败（未截获 Agent Authorization）。请先手动点一次「下载问答」，再重试批量。"
+            "鉴权失败（未截获 Authorization）。请手动点一次「下载问答」后再批量。"
           );
         })(),
         AUTH_MS,
@@ -279,7 +234,6 @@
         if (handledIds[d.msgId]) return;
         handledIds[d.msgId] = Date.now();
       }
-      // Ignore batch-run in MAIN — downloads moved to background (CORS)
       if (d.type === "batch-run") {
         emit({
           type: "batch-ack",
@@ -287,12 +241,12 @@
           action: "rejected-use-background",
           count: 0,
         });
-        status("请使用扩展后台下载（页面直连 Agent 会 CORS Failed to fetch）", true);
+        status("禁止页面下载：请使用扩展后台（重新加载 1.0.9 扩展）", true);
         emit({
           type: "batch-done",
           requestId: d.requestId,
           ok: false,
-          text: "v1.0.8：下载已改走扩展 background Port，请确认已加载带 background 的扩展包并硬刷新",
+          text: "v1.0.9：页面侧禁止下载 Agent；请确认扩展后台已加载",
         });
         return;
       }
@@ -316,7 +270,7 @@
         emit({ type: "batch-ack", requestId: d.requestId, action: d.type });
         ensureAgentBearer(d.sessionId || "")
           .then(function () {
-            status("鉴权已就绪（" + (authPath || "captured") + "）→ 交由扩展后台下载");
+            status("鉴权候选就绪（" + (authPath || "captured") + "）→ 扩展后台下载");
             emitBearer(d.requestId, true);
           })
           .catch(function (err) {
@@ -329,6 +283,9 @@
           });
       } else if (d.type === "get-bearer") {
         emitBearer(d.requestId, !!agentBearer, agentBearer ? "" : "尚无 Bearer");
+      } else if (d.type === "inject-bearer" && d.bearer) {
+        // background → content → bridge: optional sync of webRequest-captured token
+        rememberBearer(d.bearer, d.authPath || "webRequest");
       }
     }
 
@@ -347,7 +304,7 @@
       }
     });
 
-    emit({ type: "bridge-ready", version: VERSION, downloadVia: "background" });
+    emit({ type: "bridge-ready", version: VERSION, downloadVia: "background", noPageFetch: true });
   } catch (err) {
     try {
       console.error("[a3-batch-qa-bridge]", err);

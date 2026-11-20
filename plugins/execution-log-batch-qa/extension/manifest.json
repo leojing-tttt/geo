@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "A3 执行记录 · 批量下载问答",
-  "version": "1.0.8",
-  "description": "批量下载「下载问答」；background Port 绕过 CORS；条目名=用户_最近一轮.txt",
+  "version": "1.0.9",
+  "description": "批量下载「下载问答」；webRequest 截获鉴权 + background 下载；禁止页面 fetch Agent",
   "icons": {},
   "action": {
     "default_title": "A3 批量下载问答"
@@ -10,7 +10,7 @@
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": ["downloads"],
+  "permissions": ["downloads", "webRequest"],
   "host_permissions": [
     "https://a3-lib.a3database.cn/*",
     "https://a3-pre-lib.a3database.cn/*",

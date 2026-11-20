@@ -1,13 +1,13 @@
 /**
- * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.8+).
+ * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.9+).
  *
  * Safety rules (do NOT break page load):
  * - UI in ISOLATED: never MutationObserver / history rewrite / Ant Table cell injection
  * - Soft-poll for tr[data-row-key]; UI on document.body only
- * - MAIN bridge only captures Bearer; NEVER page-fetch Agent download URLs
- * - Downloads via MV3 background Port (keeps SW alive; zip stays in background)
+ * - ZERO page fetch to Agent; refuse batch if background ping fails
+ * - Downloads via MV3 background Port; zip stays in background
  *
- * API:
+ * API (background only):
  *   GET {agentBase}/admin/conversations/{sessionId}/download?variant=brief
  */
 (function (root, factory) {
@@ -27,7 +27,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  var VERSION = "1.0.8";
+  var VERSION = "1.0.9";
   var VARIANT = "brief";
   var POLL_MS = 1500;
   var BRIDGE_ACK_MS = 2500;
@@ -35,11 +35,23 @@
   var BATCH_OVERALL_BASE_MS = 40000;
   var BATCH_OVERALL_PER_MS = 28000;
   var BATCH_OVERALL_CAP_MS = 12 * 60 * 1000;
+  var BG_REQUIRED_MSG = "扩展后台未加载，请重新加载扩展";
   var hasExtensionRuntime =
     typeof chrome !== "undefined" &&
     chrome.runtime &&
     (typeof chrome.runtime.sendMessage === "function" || typeof chrome.runtime.connect === "function");
   var activePort = null;
+  var bgAlive = false;
+  var bgVersion = "";
+
+  function sanitizeUiError(text) {
+    var s = String(text == null ? "" : text);
+    if (/Failed to fetch/i.test(s)) {
+      return s.replace(/Failed to fetch/gi, "网络失败").replace(/TypeError:\s*/gi, "") +
+        "（若仍失败请重新加载 1.0.9 扩展）";
+    }
+    return s;
+  }
   var HOST_AGENT = {
     "a3-lib.a3database.cn": "https://agent.a3database.cn",
     "a3-pre-lib.a3database.cn": "https://agent.a3database.cn",
@@ -273,7 +285,7 @@
     } catch (e) {
       /* ignore */
     }
-    if (uiText != null) setStatus(uiText, !!isError);
+    if (uiText != null) setStatus(sanitizeUiError(uiText), !!isError);
   }
 
   function finishActiveBatch(ok, text, data) {
@@ -291,11 +303,12 @@
         /* ignore */
       }
     }
-    clearBusy(text || (ok ? "完成" : "失败"), !ok);
+    var safe = sanitizeUiError(text || (ok ? "完成" : "失败"));
+    clearBusy(safe, !ok);
     if (!ab) return;
     try {
-      if (ok) ab.resolve(data || { ok: true, text: text });
-      else ab.reject(new Error(text || "批量失败"));
+      if (ok) ab.resolve(data || { ok: true, text: safe });
+      else ab.reject(new Error(safe || "批量失败"));
     } catch (e) {
       /* ignore */
     }
@@ -520,7 +533,7 @@
           if (!gotAck) {
             finishActiveBatch(
               false,
-              "扩展后台 Port 未连通" + (errMsg ? "：" + errMsg : "") + "。请重新加载 1.0.8 扩展。"
+              BG_REQUIRED_MSG + (errMsg ? "：" + errMsg : "")
             );
             reject(new Error(errMsg || "port disconnected before ack"));
           } else {
@@ -707,8 +720,55 @@
   function setStatus(text, isError) {
     var el = document.getElementById("a3-batch-qa-status");
     if (!el) return;
-    el.textContent = text || "";
+    el.textContent = sanitizeUiError(text || "");
     el.className = isError ? "is-error" : "";
+  }
+
+  function pingBackground() {
+    return new Promise(function (resolve) {
+      if (!hasExtensionRuntime || typeof chrome.runtime.sendMessage !== "function") {
+        bgAlive = false;
+        resolve({ ok: false, reason: "no-runtime" });
+        return;
+      }
+      try {
+        chrome.runtime.sendMessage({ source: BRIDGE_SOURCE, type: "ping-bg" }, function (resp) {
+          if (chrome.runtime.lastError || !resp || !resp.ok) {
+            bgAlive = false;
+            bgVersion = "";
+            resolve({ ok: false, reason: (chrome.runtime.lastError && chrome.runtime.lastError.message) || "no-pong" });
+            return;
+          }
+          bgAlive = true;
+          bgSeen = true;
+          bgVersion = resp.version || "";
+          resolve(resp);
+        });
+      } catch (err) {
+        bgAlive = false;
+        resolve({ ok: false, reason: String(err && err.message ? err.message : err) });
+      }
+    });
+  }
+
+  function getCapturedBearerFromBg() {
+    return new Promise(function (resolve) {
+      if (!hasExtensionRuntime) {
+        resolve(null);
+        return;
+      }
+      try {
+        chrome.runtime.sendMessage({ source: BRIDGE_SOURCE, type: "get-captured-bearer" }, function (resp) {
+          if (chrome.runtime.lastError || !resp || !resp.ok || !resp.bearer) {
+            resolve(null);
+            return;
+          }
+          resolve({ bearer: String(resp.bearer), authPath: resp.authPath || "webRequest" });
+        });
+      } catch (e) {
+        resolve(null);
+      }
+    });
   }
 
   function selectedIds() {
@@ -810,7 +870,7 @@
         });
       setTimeout(function () {
         if (!bridgeSeen) {
-          setStatus("桥接无响应：请加载 1.0.8 扩展并硬刷新", true);
+          setStatus(BG_REQUIRED_MSG + "（页面桥接无响应）", true);
         }
       }, BRIDGE_ACK_MS);
     });
@@ -847,10 +907,7 @@
       return Promise.resolve();
     }
     if (!hasExtensionRuntime) {
-      clearBusy(
-        "当前环境无扩展 background（CORS 无法从页面直连 Agent）。请安装 Chrome 扩展 1.0.8。",
-        true
-      );
+      clearBusy(BG_REQUIRED_MSG, true);
       return Promise.resolve();
     }
 
@@ -888,24 +945,34 @@
       }, overallMs);
 
       (async function () {
-        setStatus("1/3 截获页面 Agent Bearer…");
-        var auth = await requestBearer(jobs[0].sessionId);
-        if (!auth || !auth.bearer) {
-          throw new Error("鉴权失败：Bearer 为空（不会发起下载，避免误报 Failed to fetch）");
+        setStatus("0/3 检查扩展后台…");
+        var ping = await pingBackground();
+        if (!ping || !ping.ok) {
+          throw new Error(BG_REQUIRED_MSG);
         }
-        setStatus("2/3 鉴权就绪（" + (auth.authPath || "captured") + "），Port → 扩展后台…");
+        setStatus("1/3 后台在线 v" + (ping.version || VERSION) + "，获取 Bearer…");
+
+        var auth = await getCapturedBearerFromBg();
+        if (!auth || !auth.bearer) {
+          // warm DOM click / XHR observe via MAIN bridge, then re-read webRequest capture
+          try {
+            auth = await requestBearer(jobs[0].sessionId);
+          } catch (e) {
+            auth = null;
+          }
+          var again = await getCapturedBearerFromBg();
+          if (again && again.bearer) auth = again;
+        }
+        if (!auth || !auth.bearer) {
+          throw new Error("鉴权失败：Bearer 为空。请先手动点一次「下载问答」再批量。");
+        }
+        setStatus("2/3 鉴权就绪（" + (auth.authPath || "captured") + "），Port → 后台下载…");
 
         ab.ackTimer = setTimeout(function () {
           if (!activeBatch || activeBatch.requestId !== requestId) return;
-          finishActiveBatch(
-            false,
-            "扩展后台未响应（" +
-              BRIDGE_ACK_MS / 1000 +
-              "s）。请确认已加载 1.0.8（含 background.js）并硬刷新。"
-          );
+          finishActiveBatch(false, BG_REQUIRED_MSG + "（批量确认超时）");
         }, BRIDGE_ACK_MS);
 
-        // Port keeps SW alive; zip/files never cross sendMessage size limits
         startBackgroundBatch({
           type: "batch-download",
           requestId: requestId,
@@ -978,38 +1045,29 @@
       installBridgeListener();
       postToBridge({ type: "ping", requestId: newMsgId() });
       postToBridge({ type: "request-auth" });
-      if (hasExtensionRuntime) {
-        try {
-          chrome.runtime.sendMessage({ source: BRIDGE_SOURCE, type: "ping-bg" }, function (resp) {
-            if (!chrome.runtime.lastError && resp && resp.ok) {
-              bgSeen = true;
-              try {
-                setStatus("扩展后台在线 v" + (resp.version || VERSION) + "（可绕过 CORS）");
-              } catch (e) {
-                /* ignore */
-              }
-            }
-          });
-        } catch (e) {
-          /* ignore */
+      pingBackground().then(function (resp) {
+        if (resp && resp.ok) {
+          try {
+            setStatus(
+              "扩展后台在线 v" +
+                (resp.version || VERSION) +
+                (resp.hasCapturedBearer ? "；已截获 Bearer" : "；待截获 Bearer")
+            );
+          } catch (e) {
+            /* ignore */
+          }
         }
-      }
+      });
       setTimeout(function () {
-        if (!bridgeSeen) {
+        if (!hasExtensionRuntime || !bgAlive) {
           try {
-            setStatus("警告：未检测到页面桥接。请装 1.0.8 扩展并硬刷新。", true);
+            setStatus(BG_REQUIRED_MSG, true);
           } catch (e) {
             /* ignore */
           }
-        } else if (hasExtensionRuntime && !bgSeen) {
+        } else if (!bridgeSeen) {
           try {
-            setStatus("警告：页面桥接在，但后台未响应。请重新加载 1.0.8 扩展。", true);
-          } catch (e) {
-            /* ignore */
-          }
-        } else if (!hasExtensionRuntime) {
-          try {
-            setStatus("当前非扩展环境：无法后台下载（会 CORS）。请用 Chrome 扩展 1.0.8。", true);
+            setStatus("警告：后台在线但页面桥接未就绪，请硬刷新。", true);
           } catch (e) {
             /* ignore */
           }

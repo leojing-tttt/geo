@@ -1,14 +1,61 @@
 /**
- * MV3 service worker — downloads Agent brief txt + STORE zip (v1.0.8).
- * Extension host_permissions bypass page CORS.
- * Long batches use runtime Port so the SW is not unloaded mid-run.
+ * MV3 service worker (v1.0.9).
+ * - Captures Agent Authorization via webRequest (no page download)
+ * - Downloads + STORE zip here only (host_permissions)
+ * - Never surfaces raw English "Failed to fetch" to UI
  */
 /* eslint-disable no-undef */
 "use strict";
 
-var VERSION = "1.0.8";
+var VERSION = "1.0.9";
 var VARIANT = "brief";
 var PER_FILE_MS = 25000;
+
+/** tabId -> { bearer, authPath, at } */
+var capturedByTab = Object.create(null);
+var lastGlobalBearer = { bearer: "", authPath: "", at: 0 };
+
+function stripBearer(v) {
+  if (!v) return "";
+  var m = String(v).match(/^\s*Bearer\s+(.+)\s*$/i);
+  return (m ? m[1] : String(v)).trim();
+}
+
+function rememberCaptured(tabId, bearer, path) {
+  var t = stripBearer(bearer);
+  if (!t) return;
+  var row = { bearer: t, authPath: path || "webRequest", at: Date.now() };
+  lastGlobalBearer = row;
+  if (tabId != null) capturedByTab[tabId] = row;
+}
+
+try {
+  chrome.webRequest.onBeforeSendHeaders.addListener(
+    function (details) {
+      try {
+        if (!details || !details.requestHeaders) return;
+        for (var i = 0; i < details.requestHeaders.length; i++) {
+          var h = details.requestHeaders[i];
+          if (h && String(h.name).toLowerCase() === "authorization" && h.value) {
+            rememberCaptured(details.tabId, h.value, "webRequest");
+            break;
+          }
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    },
+    {
+      urls: [
+        "https://agent.a3database.cn/*",
+        "https://agent-test.a3database.cn/*",
+      ],
+    },
+    ["requestHeaders", "extraHeaders"]
+  );
+} catch (e) {
+  console.warn("[a3-batch-qa-bg] webRequest listen failed", e);
+}
 
 function crcTable() {
   var table = new Uint32Array(256);
@@ -123,13 +170,18 @@ function downloadUrl(agentBase, sessionId) {
   );
 }
 
-function formatFetchError(err) {
-  var em = String(err && err.message ? err.message : err);
-  if (/aborted|AbortError/i.test(em)) return "下载超时（" + PER_FILE_MS / 1000 + "s）";
-  if (/Failed to fetch|NetworkError|network/i.test(em)) {
-    return "后台网络错误（" + em + "）— 非页面 CORS；检查 Agent 域名/网络";
+/** Never let raw browser TypeError text reach the panel. */
+function sanitizeUserError(err) {
+  var em = String(err && err.message ? err.message : err == null ? "" : err);
+  // Strip / remap the exact English CORS/network phrase users complained about
+  if (/Failed to fetch/i.test(em) || em === "TypeError: Failed to fetch") {
+    return "后台无法访问 Agent（网络/权限）。请确认已重新加载 1.0.9 扩展且允许 agent.a3database.cn";
   }
-  return em;
+  if (/aborted|AbortError/i.test(em)) return "下载超时（" + PER_FILE_MS / 1000 + "s）";
+  if (/NetworkError|net::|ERR_/i.test(em)) {
+    return "后台网络错误：" + em.replace(/Failed to fetch/gi, "网络失败");
+  }
+  return em.replace(/Failed to fetch/gi, "网络失败");
 }
 
 function notifyTab(tabId, msg) {
@@ -163,7 +215,7 @@ async function fetchOne(agentBase, sessionId, bearer) {
       signal: ctrl.signal,
     });
     if (res.status === 401 || res.status === 403) {
-      throw new Error("鉴权无效 HTTP " + res.status + "（Bearer 被 Agent 拒绝，请重新点「下载问答」截获）");
+      throw new Error("鉴权无效 HTTP " + res.status + "（Bearer 被拒，请重新点「下载问答」）");
     }
     if (!res.ok) {
       var detail = "";
@@ -176,17 +228,12 @@ async function fetchOne(agentBase, sessionId, bearer) {
     }
     return new Uint8Array(await res.arrayBuffer());
   } catch (err) {
-    throw new Error(formatFetchError(err));
+    throw new Error(sanitizeUserError(err));
   } finally {
     clearTimeout(timer);
   }
 }
 
-/**
- * @param {object} msg
- * @param {number|null} tabId
- * @param {(m: object) => void} push - progress/done sink (port and/or tab)
- */
 async function runBatch(msg, tabId, push) {
   var jobs = msg.jobs || [];
   var bearer = String(msg.bearer || "").trim();
@@ -197,6 +244,7 @@ async function runBatch(msg, tabId, push) {
 
   function emit(m) {
     var payload = Object.assign({ requestId: requestId }, m);
+    if (payload.text) payload.text = sanitizeUserError(payload.text);
     try {
       push(payload);
     } catch (e) {
@@ -205,13 +253,21 @@ async function runBatch(msg, tabId, push) {
     notifyTab(tabId, payload);
   }
 
+  if (!bearer) {
+    var cap = (tabId != null && capturedByTab[tabId]) || lastGlobalBearer;
+    if (cap && cap.bearer && Date.now() - cap.at < 30 * 60 * 1000) {
+      bearer = cap.bearer;
+      authPath = authPath || cap.authPath || "webRequest";
+    }
+  }
+
   if (!bearer) throw new Error("缺少 Agent Bearer（请先点「下载问答」或「同步鉴权」）");
   if (!agentBase) throw new Error("缺少 agentBase");
   if (!jobs.length) throw new Error("没有可下载的会话");
 
   emit({
     type: "batch-status",
-    text: "后台下载启动（扩展绕过 CORS）0/" + jobs.length + " 鉴权:" + (authPath || "bearer"),
+    text: "后台下载启动 0/" + jobs.length + " 鉴权:" + (authPath || "bearer"),
   });
 
   var files = [];
@@ -227,21 +283,20 @@ async function runBatch(msg, tabId, push) {
       var data = await fetchOne(agentBase, job.sessionId, bearer);
       files.push({ name: name, data: data });
     } catch (err) {
-      var em = String(err && err.message ? err.message : err);
+      var em = sanitizeUserError(err);
       errors.push(name + ": " + em);
       emit({
         type: "batch-status",
         text: "失败 " + (i + 1) + "/" + jobs.length + " " + em,
         error: true,
       });
-      // Hard-stop if auth is clearly dead — avoid 29 identical 401s
       if (/鉴权无效 HTTP 401|鉴权无效 HTTP 403/.test(em)) {
         throw new Error(em + "；已中止剩余 " + (jobs.length - i - 1) + " 个");
       }
     }
   }
 
-  if (!files.length) throw new Error(errors[0] || "全部下载失败");
+  if (!files.length) throw new Error(sanitizeUserError(errors[0] || "全部下载失败"));
 
   emit({
     type: "batch-status",
@@ -282,17 +337,18 @@ async function runBatch(msg, tabId, push) {
 
   return {
     ok: true,
-    text:
+    text: sanitizeUserError(
       "已打包 " +
-      files.length +
-      "/" +
-      jobs.length +
-      " → " +
-      zipName +
-      "（后台/无CORS，鉴权:" +
-      (authPath || "bearer") +
-      ")" +
-      (errors.length ? "；失败 " + errors.length : ""),
+        files.length +
+        "/" +
+        jobs.length +
+        " → " +
+        zipName +
+        "（后台，鉴权:" +
+        (authPath || "bearer") +
+        ")" +
+        (errors.length ? "；失败 " + errors.length : "")
+    ),
     okCount: files.length,
     failCount: errors.length,
     authPath: authPath,
@@ -320,7 +376,7 @@ function handleBatchMessage(msg, tabId, push) {
       return result;
     })
     .catch(function (err) {
-      var text = String(err && err.message ? err.message : err);
+      var text = sanitizeUserError(err);
       push({
         type: "batch-done",
         requestId: msg.requestId,
@@ -331,7 +387,6 @@ function handleBatchMessage(msg, tabId, push) {
     });
 }
 
-// Port path — keeps SW alive for long batches; zip stays in background (no file bytes on sendMessage)
 chrome.runtime.onConnect.addListener(function (port) {
   if (!port || port.name !== "a3-batch-qa") return;
   port.onMessage.addListener(function (msg) {
@@ -349,16 +404,35 @@ chrome.runtime.onConnect.addListener(function (port) {
   });
 });
 
-// Short messages only (ping / legacy)
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || msg.source !== "a3-batch-qa") return;
+  var tabId = sender.tab && sender.tab.id;
+
   if (msg.type === "ping-bg") {
-    sendResponse({ ok: true, version: VERSION, portBatch: true });
+    var cap = (tabId != null && capturedByTab[tabId]) || lastGlobalBearer;
+    sendResponse({
+      ok: true,
+      version: VERSION,
+      portBatch: true,
+      webRequest: true,
+      hasCapturedBearer: !!(cap && cap.bearer),
+      authPath: (cap && cap.authPath) || "",
+    });
     return;
   }
+
+  if (msg.type === "get-captured-bearer") {
+    var c = (tabId != null && capturedByTab[tabId]) || lastGlobalBearer;
+    sendResponse({
+      ok: !!(c && c.bearer),
+      bearer: (c && c.bearer) || "",
+      authPath: (c && c.authPath) || "",
+      version: VERSION,
+    });
+    return;
+  }
+
   if (msg.type === "batch-download") {
-    // Legacy fallback: still supported, but Port is preferred
-    var tabId = sender.tab && sender.tab.id;
     function push(m) {
       notifyTab(tabId, Object.assign({ source: "a3-batch-qa-bg" }, m));
     }
@@ -366,14 +440,13 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       try {
         sendResponse(result);
       } catch (e) {
-        /* channel may already be closed — Port/tab notify already sent */
+        /* ignore */
       }
     });
     return true;
   }
 });
 
-// For node regress tests (ignored in SW)
 try {
   if (typeof globalThis !== "undefined") {
     globalThis.__A3BatchQaBg = {
@@ -382,7 +455,8 @@ try {
       downloadUrl: downloadUrl,
       runBatch: runBatch,
       fetchOne: fetchOne,
-      formatFetchError: formatFetchError,
+      sanitizeUserError: sanitizeUserError,
+      formatFetchError: sanitizeUserError,
     };
   }
 } catch (e) {
