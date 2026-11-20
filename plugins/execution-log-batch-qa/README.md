@@ -4,7 +4,9 @@
 
 > 浏览器插件（userscript / Chrome MV3），**不改** A3 产品仓库。鉴权复用当前登录态与 AUTO Token，仓库内无任何密钥。
 
-**v1.0.4：** 修复 ISOLATED 扩展读不到页面鉴权 → `/me/auto` 401。增加 **MAIN-world `page-bridge.js`**：读取 `localStorage.token`、旁路捕获 Agent `Authorization`、页面上下文换取 AUTO Token；失败时提示先点一次「下载问答」。
+**v1.0.5：** **不再依赖 `/me/auto`**。`page-bridge.js` 在 `document_start` 截获页面发给 Agent 的 `Authorization`（与单行「下载问答」相同）；批量下载在 MAIN 执行。也可尝试登录 `localStorage.token` 直连 Agent；必要时自动点一次「下载问答」预热。
+
+**v1.0.4：** 曾尝试 MAIN 桥接 + `/me/auto`（仍可能 401，已由 1.0.5 取代）。
 
 **v1.0.3：** ZIP 内文件名改为列表列 **用户_最近一轮.txt**（只读表头/单元格，不改表格 DOM）。
 
@@ -43,9 +45,9 @@ Host 映射与页面一致：
 | `a3-pre-lib.a3database.cn` | `https://pre-api.a3database.cn` | `https://agent.a3database.cn/scope` |
 | `a3-test-lib.a3database.cn` | `https://test-api.a3database.cn` | `https://agent-test.a3database.cn/scope` |
 
-鉴权优先级：页面真实 Agent `Authorization`（点过「下载问答」或列表请求）→ MAIN 桥接读取的 `localStorage.token` 换 `/me/auto` → 登录 token 直打 Agent（兜底）。仓库不保存、不提交任何 token。
+鉴权优先级（均在 MAIN）：`document_start` 截获的 Agent Bearer → 登录 `localStorage.token` 直连下载探活 → 自动点击「下载问答」截获。**不把 `/me/auto` 当主路径。** 仓库不保存、不提交任何 token。
 
-Chrome：**ISOLATED** `content.js`（UI）+ **MAIN** `page-bridge.js`（鉴权桥）。
+Chrome：**MAIN** `page-bridge.js`（`document_start`，下载引擎）+ **ISOLATED** `content.js`（浮动面板 UI）。
 
 ## 安装
 

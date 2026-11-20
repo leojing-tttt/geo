@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "A3 执行记录 · 批量下载问答",
-  "version": "1.0.4",
-  "description": "批量下载「下载问答」为 ZIP；MAIN 桥接读取页面鉴权，不改表格 DOM",
+  "version": "1.0.5",
+  "description": "批量下载「下载问答」；MAIN 截获页面 Agent Authorization 并下载打包",
   "icons": {},
   "action": {
     "default_title": "A3 批量下载问答"
@@ -25,7 +25,7 @@
         "https://a3-test-lib.a3database.cn/*"
       ],
       "js": ["page-bridge.js"],
-      "run_at": "document_idle",
+      "run_at": "document_start",
       "world": "MAIN"
     },
     {
