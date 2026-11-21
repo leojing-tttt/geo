@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "A3 执行记录 · 批量下载问答",
+  "version": "1.0.11",
+  "description": "批量下载问答（手动）；webRequest 鉴权 + background 下载；无页面自动导出",
+  "icons": {},
+  "action": {
+    "default_title": "A3 批量下载问答"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["downloads", "webRequest"],
+  "host_permissions": [
+    "https://a3-lib.a3database.cn/*",
+    "https://a3-pre-lib.a3database.cn/*",
+    "https://a3-test-lib.a3database.cn/*",
+    "https://api.a3database.cn/*",
+    "https://pre-api.a3database.cn/*",
+    "https://test-api.a3database.cn/*",
+    "https://agent.a3database.cn/*",
+    "https://agent-test.a3database.cn/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://a3-lib.a3database.cn/*",
+        "https://a3-pre-lib.a3database.cn/*",
+        "https://a3-test-lib.a3database.cn/*"
+      ],
+      "js": ["page-bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://a3-lib.a3database.cn/*",
+        "https://a3-pre-lib.a3database.cn/*",
+        "https://a3-test-lib.a3database.cn/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
