@@ -1,5 +1,5 @@
 /**
- * MV3 service worker (v1.0.9).
+ * MV3 service worker (v1.0.11).
  * - Captures Agent Authorization via webRequest (no page download)
  * - Downloads + STORE zip here only (host_permissions)
  * - Never surfaces raw English "Failed to fetch" to UI
@@ -7,7 +7,7 @@
 /* eslint-disable no-undef */
 "use strict";
 
-var VERSION = "1.0.9";
+var VERSION = "1.0.11";
 var VARIANT = "brief";
 var PER_FILE_MS = 25000;
 
@@ -160,6 +160,15 @@ function buildZip(entries) {
   return concatBytes(localParts.concat([centralDir, end]));
 }
 
+function zipBytesToDataUrl(bytes) {
+  var binary = "";
+  var chunk = 0x8000;
+  for (var i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return "data:application/zip;base64," + btoa(binary);
+}
+
 function downloadUrl(agentBase, sessionId) {
   return (
     String(agentBase).replace(/\/+$/, "") +
@@ -175,7 +184,7 @@ function sanitizeUserError(err) {
   var em = String(err && err.message ? err.message : err == null ? "" : err);
   // Strip / remap the exact English CORS/network phrase users complained about
   if (/Failed to fetch/i.test(em) || em === "TypeError: Failed to fetch") {
-    return "后台无法访问 Agent（网络/权限）。请确认已重新加载 1.0.9 扩展且允许 agent.a3database.cn";
+    return "后台无法访问 Agent（网络/权限）。请确认已重新加载 1.0.11 扩展且允许 agent.a3database.cn";
   }
   if (/aborted|AbortError/i.test(em)) return "下载超时（" + PER_FILE_MS / 1000 + "s）";
   if (/NetworkError|net::|ERR_/i.test(em)) {
@@ -304,36 +313,26 @@ async function runBatch(msg, tabId, push) {
   });
 
   var zipBytes = buildZip(files);
-  var blob = new Blob([zipBytes], { type: "application/zip" });
-  var url = URL.createObjectURL(blob);
+  // MV3 service worker: no createObjectURL; use data URL
+  var url = zipBytesToDataUrl(zipBytes);
 
-  try {
-    await new Promise(function (resolve, reject) {
-      chrome.downloads.download(
-        {
-          url: url,
-          filename: zipName,
-          saveAs: false,
-          conflictAction: "uniquify",
-        },
-        function (downloadId) {
-          if (chrome.runtime.lastError) {
-            reject(new Error(chrome.runtime.lastError.message || "downloads API 失败"));
-            return;
-          }
-          resolve(downloadId);
+  await new Promise(function (resolve, reject) {
+    chrome.downloads.download(
+      {
+        url: url,
+        filename: zipName,
+        saveAs: false,
+        conflictAction: "uniquify",
+      },
+      function (downloadId) {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message || "downloads API 失败"));
+          return;
         }
-      );
-    });
-  } finally {
-    setTimeout(function () {
-      try {
-        URL.revokeObjectURL(url);
-      } catch (e) {
-        /* ignore */
+        resolve(downloadId);
       }
-    }, 60000);
-  }
+    );
+  });
 
   return {
     ok: true,

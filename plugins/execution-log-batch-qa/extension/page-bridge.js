@@ -1,5 +1,5 @@
 /**
- * MAIN-world auth bridge (v1.0.9).
+ * MAIN-world auth bridge (v1.0.11).
  * No page network API wrappers for Agent downloads. Only:
  *  - soft-observe XHR Authorization (alova may use XHR in some builds)
  *  - optional DOM click on 「下载问答」so background webRequest can capture Bearer
@@ -13,7 +13,7 @@
 
     var SOURCE = "a3-batch-qa";
     var EVENT = "__a3_batch_qa";
-    var VERSION = "1.0.9";
+    var VERSION = "1.0.11";
     var AUTH_MS = 12000;
 
     var agentBearer = "";
@@ -241,12 +241,12 @@
           action: "rejected-use-background",
           count: 0,
         });
-        status("禁止页面下载：请使用扩展后台（重新加载 1.0.9 扩展）", true);
+        status("禁止页面下载：请使用扩展后台（重新加载 1.0.11 扩展）", true);
         emit({
           type: "batch-done",
           requestId: d.requestId,
           ok: false,
-          text: "v1.0.9：页面侧禁止下载 Agent；请确认扩展后台已加载",
+          text: "v1.0.11：页面侧禁止下载 Agent；请确认扩展后台已加载",
         });
         return;
       }

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * v1.0.9 regress: page/content have ZERO fetch(; background alone fetches Agent;
- * user-facing errors never contain raw "Failed to fetch".
+ * v1.0.11 regress: page/content have ZERO fetch(; background alone fetches Agent;
+ * user-facing errors never contain raw "Failed to fetch";
+ * no auto-dump / dump-day leftovers.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -39,9 +40,35 @@ for (const rel of pageSources) {
   }
 }
 
+const allPluginSources = [
+  "shared/batch-qa-core.js",
+  "extension/content.js",
+  "extension/page-bridge.js",
+  "extension/background.js",
+  "userscript/a3-execution-log-batch-qa.user.js",
+];
+const banned = [
+  "autoDumpStarted",
+  "autoDumpDay",
+  "autoDump",
+  "dump-day",
+  "writeDumpStatus",
+  "DUMP_DAY",
+  "runDumpDay",
+  "20261120",
+];
+for (const rel of allPluginSources) {
+  const src = read(rel);
+  const hits = banned.filter((b) => src.includes(b));
+  if (hits.length) fail(`${rel}: banned auto-dump leftovers: ${hits.join(", ")}`);
+  else ok(`${rel}: no auto-dump leftovers`);
+}
+
 const bgSrc = read("extension/background.js");
 if (!/\bfetch\s*\(/.test(bgSrc)) fail("background.js must fetch Agent downloads");
 else ok("background.js: has fetch( (expected)");
+if (!bgSrc.includes("zipBytesToDataUrl")) fail("background.js missing zipBytesToDataUrl (MV3 data URL path)");
+else ok("background.js: zipBytesToDataUrl present");
 
 const fetchCalls = [];
 const downloads = [];
@@ -106,6 +133,9 @@ const context = {
       this.type = (opts && opts.type) || "";
     }
   },
+  btoa(s) {
+    return Buffer.from(String(s), "binary").toString("base64");
+  },
   TextEncoder,
   Uint8Array,
   Uint32Array,
@@ -130,8 +160,8 @@ if (!api) {
   fail("missing __A3BatchQaBg");
   process.exit(1);
 }
-if (api.VERSION !== "1.0.9") fail("VERSION want 1.0.9 got " + api.VERSION);
-else ok("VERSION 1.0.9");
+if (api.VERSION !== "1.0.11") fail("VERSION want 1.0.11 got " + api.VERSION);
+else ok("VERSION 1.0.11");
 
 // sanitize must erase raw phrase
 const sanitized = api.sanitizeUserError(new TypeError("Failed to fetch"));
@@ -173,16 +203,21 @@ if (!result.ok) fail("runBatch failed: " + result.text);
 if (fetchCalls.length !== 2) fail("want 2 background fetches, got " + fetchCalls.length);
 if (fetchCalls.some((c) => c.via !== "background-mock")) fail("non-background fetch");
 if (/Failed to fetch/i.test(result.text || "")) fail("result text contains Failed to fetch");
-ok("background batch ok; filenames preserved; no raw Failed to fetch");
+if (!downloads.length) fail("expected chrome.downloads.download call");
+else if (!String(downloads[0].url || "").startsWith("data:application/zip;base64,")) {
+  fail("download url should be data URL, got " + String(downloads[0].url).slice(0, 40));
+} else {
+  ok("background batch ok via data URL; filenames preserved; no raw Failed to fetch");
+}
 
 const manifest = JSON.parse(read("extension/manifest.json"));
-if (manifest.version !== "1.0.9") fail("manifest " + manifest.version);
+if (manifest.version !== "1.0.11") fail("manifest " + manifest.version);
 if (!(manifest.permissions || []).includes("webRequest")) fail("manifest missing webRequest");
 if (!(manifest.permissions || []).includes("downloads")) fail("manifest missing downloads");
-ok("manifest 1.0.9 webRequest+downloads");
+ok("manifest 1.0.11 webRequest+downloads");
 
 if (process.exitCode) {
   console.error("\nRegression FAILED");
   process.exit(1);
 }
-console.log("\nAll v1.0.9 regress checks passed.");
+console.log("\nAll v1.0.11 regress checks passed.");

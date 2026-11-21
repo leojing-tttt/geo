@@ -4,6 +4,10 @@
 
 > 浏览器插件（userscript / Chrome MV3），**不改** A3 产品仓库。鉴权复用当前登录态与 AUTO Token，仓库内无任何密钥。
 
+**v1.0.11：** 移除 Nov-20 leftover `autoDump*` / `dump-day` / `writeDumpStatus`；打开列表页**不会**自动下载；仅点击「批量下载问答」触发。面板显示 `v1.0.11`。
+
+**v1.0.10：** MV3 SW 用 data URL 落盘（修复 `createObjectURL` 不可用）；曾误夹带全天 auto-dump（已由 1.0.11 删除）。
+
 **v1.0.9：** 页面侧 **ZERO `fetch(`**（page-bridge / content）；Bearer 由 background **`webRequest`** 截获；批量前强制 `ping-bg`，失败只报「扩展后台未加载，请重新加载扩展」；用户可见错误 **禁止** 原样 `Failed to fetch`。
 
 **v1.0.8：** Port 保活 SW + mock regress（仍可能把网络 TypeError 原文透出，已由 1.0.9 封死）。

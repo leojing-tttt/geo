@@ -1,5 +1,5 @@
 /**
- * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.9+).
+ * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.11+).
  *
  * Safety rules (do NOT break page load):
  * - UI in ISOLATED: never MutationObserver / history rewrite / Ant Table cell injection
@@ -27,7 +27,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  var VERSION = "1.0.9";
+  var VERSION = "1.0.11";
   var VARIANT = "brief";
   var POLL_MS = 1500;
   var BRIDGE_ACK_MS = 2500;
@@ -48,7 +48,7 @@
     var s = String(text == null ? "" : text);
     if (/Failed to fetch/i.test(s)) {
       return s.replace(/Failed to fetch/gi, "网络失败").replace(/TypeError:\s*/gi, "") +
-        "（若仍失败请重新加载 1.0.9 扩展）";
+        "（若仍失败请重新加载 1.0.11 扩展）";
     }
     return s;
   }

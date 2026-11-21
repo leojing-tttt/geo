@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "A3 执行记录 · 批量下载问答",
-  "version": "1.0.9",
-  "description": "批量下载「下载问答」；webRequest 截获鉴权 + background 下载；禁止页面 fetch Agent",
+  "version": "1.0.11",
+  "description": "批量下载问答（手动）；webRequest 鉴权 + background 下载；无页面自动导出",
   "icons": {},
   "action": {
     "default_title": "A3 批量下载问答"

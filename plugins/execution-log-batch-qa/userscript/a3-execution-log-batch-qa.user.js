@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         A3 执行记录 · 批量下载问答
 // @namespace    https://github.com/leojing-tttt/geo
-// @version      1.0.9
-// @description  需 Chrome 扩展 1.0.9（background；页面禁止 Agent 下载）
+// @version      1.0.11
+// @description  需 Chrome 扩展 1.0.11（background；手动批量；无自动导出）
 // @author       geo plugin
 // @match        https://a3-lib.a3database.cn/*
 // @match        https://a3-pre-lib.a3database.cn/*
@@ -15,7 +15,7 @@
   "use strict";
   try {
 /**
- * MAIN-world auth bridge (v1.0.9).
+ * MAIN-world auth bridge (v1.0.11).
  * No page network API wrappers for Agent downloads. Only:
  *  - soft-observe XHR Authorization (alova may use XHR in some builds)
  *  - optional DOM click on 「下载问答」so background webRequest can capture Bearer
@@ -29,7 +29,7 @@
 
     var SOURCE = "a3-batch-qa";
     var EVENT = "__a3_batch_qa";
-    var VERSION = "1.0.9";
+    var VERSION = "1.0.11";
     var AUTH_MS = 12000;
 
     var agentBearer = "";
@@ -257,12 +257,12 @@
           action: "rejected-use-background",
           count: 0,
         });
-        status("禁止页面下载：请使用扩展后台（重新加载 1.0.9 扩展）", true);
+        status("禁止页面下载：请使用扩展后台（重新加载 1.0.11 扩展）", true);
         emit({
           type: "batch-done",
           requestId: d.requestId,
           ok: false,
-          text: "v1.0.9：页面侧禁止下载 Agent；请确认扩展后台已加载",
+          text: "v1.0.11：页面侧禁止下载 Agent；请确认扩展后台已加载",
         });
         return;
       }
@@ -331,7 +331,7 @@
 })();
 
 /**
- * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.9+).
+ * A3 Agent Center — execution-log batch 「下载问答」 core (v1.0.11+).
  *
  * Safety rules (do NOT break page load):
  * - UI in ISOLATED: never MutationObserver / history rewrite / Ant Table cell injection
@@ -359,7 +359,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  var VERSION = "1.0.9";
+  var VERSION = "1.0.11";
   var VARIANT = "brief";
   var POLL_MS = 1500;
   var BRIDGE_ACK_MS = 2500;
@@ -380,7 +380,7 @@
     var s = String(text == null ? "" : text);
     if (/Failed to fetch/i.test(s)) {
       return s.replace(/Failed to fetch/gi, "网络失败").replace(/TypeError:\s*/gi, "") +
-        "（若仍失败请重新加载 1.0.9 扩展）";
+        "（若仍失败请重新加载 1.0.11 扩展）";
     }
     return s;
   }
@@ -1429,6 +1429,7 @@
     VERSION: VERSION,
   };
 });
+
 
     if (window.A3ExecLogBatchQa) window.A3ExecLogBatchQa.start();
   } catch (err) {
